@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Clicky</string>
+    <string name="accessibility_service_label">Clicky</string>
+    <string name="accessibility_service_description">Clicky needs Accessibility access to read on-screen UI, take screenshots, and perform taps/swipes on your behalf. Your screen content is used only to power Clicky\'s assistant features.</string>
+    <string name="enable_accessibility_toast">Enable Clicky in Accessibility settings</string>
+    <string name="main_hint">Enable Clicky under Settings → Accessibility, then return here.</string>
+    <string name="open_accessibility_settings">Open Accessibility settings</string>
+
+    <string name="overlay_channel_name">Clicky overlay</string>
+    <string name="overlay_channel_description">Keeps the Clicky bubble and coaching overlay ready</string>
+    <string name="overlay_notification_title">Clicky is ready</string>
+    <string name="overlay_notification_text">Bubble and coaching overlay are active</string>
+    <string name="overlay_stop">Stop</string>
+    <string name="debug_overlay_demo">Run overlay debug demo</string>
+    <string name="open_overlay_settings">Grant overlay permission</string>
+    <string name="refresh_status">Refresh status</string>
+    <string name="overlay_status_granted">Overlay permission: granted</string>
+    <string name="overlay_status_denied">Overlay permission: not granted</string>
+    <string name="overlay_enable_instructions">Enable \"Appear on top\" / \"Display over other apps\" for Clicky specifically (%1$s). Turning it on for other apps does nothing.</string>
+    <string name="overlay_enable_for_clicky_toast">Enable \"Appear on top\" / \"Display over other apps\" for Clicky (%1$s), then return here.</string>
+    <string name="overlay_still_denied_toast">Still not granted. In the list, find Clicky (%1$s) and toggle \"Appear on top\" / \"Display over other apps\" ON.</string>
+    <string name="overlay_already_granted">Overlay permission already granted</string>
+    <string name="open_agent_debug">Open agent debug</string>
+    <string name="agent_debug_label">Agent debug</string>
+    <string name="mic_status_granted">Microphone: granted</string>
+    <string name="mic_status_denied">Microphone: not granted (needed for voice)</string>
+    <string name="grant_microphone">Grant microphone</string>
+    <string name="mic_already_granted">Microphone already granted</string>
+    <string name="mic_granted_toast">Microphone ready — tap the Clicky bubble to talk</string>
+    <string name="mic_denied_toast">Microphone denied — voice commands won\'t work</string>
+</resources>
