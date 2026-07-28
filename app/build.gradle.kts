@@ -27,11 +27,11 @@ val deepgramApiKey: String = localProperties.getProperty("DEEPGRAM_API_KEY") ?: 
 val sarvamApiKey: String = localProperties.getProperty("SARVAM_API_KEY") ?: ""
 
 android {
-    namespace = "com.clicky"
+    namespace = "com.drishti"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.clicky"
+        applicationId = "com.drishti"
         minSdk = 30
         targetSdk = 35
         versionCode = 1

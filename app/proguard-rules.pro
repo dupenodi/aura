@@ -1,1 +1,1 @@
-# Clicky ProGuard rules (release minify currently off).
+# Drishti ProGuard rules (release minify currently off).
