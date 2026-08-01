@@ -9,6 +9,8 @@ import com.drishti.ai.ChatModels
 import com.drishti.ai.LlmRouter
 import com.drishti.data.AuraPrefs
 import com.drishti.data.LockedToGuide
+import com.drishti.data.Routine
+import com.drishti.data.RoutineStore
 import com.drishti.data.TaskHistory
 import com.drishti.data.TaskOutcome
 import com.drishti.data.TaskRecord
@@ -40,7 +42,11 @@ class AgentOrchestrator(
     private val runStore = RunStore.get(appContext)
     private val prefs = AuraPrefs.get(appContext)
     private val history = TaskHistory.get(appContext)
+    private val routines = RoutineStore.get(appContext)
     private val promptImprover = PromptImprover(appContext)
+
+    /** Steps taken in the current run, kept so a routine can learn its route. */
+    private val routeTaken = mutableListOf<String>()
     private var job: Job? = null
     private var pendingAsk: CompletableDeferred<String>? = null
 
@@ -49,6 +55,12 @@ class AgentOrchestrator(
 
     /** Notifies the UI when a task starts/stops so the avatar can show activity. */
     var onRunStateChanged: ((running: Boolean) -> Unit)? = null
+
+    /**
+     * Reports the current step and what it is doing, in plain language, so the run
+     * banner can keep the user informed rather than leaving them guessing.
+     */
+    var onProgress: ((step: Int, message: String) -> Unit)? = null
 
     fun cancel() {
         job?.cancel()
@@ -62,11 +74,15 @@ class AgentOrchestrator(
         pendingAsk = null
     }
 
-    fun runTask(rawTask: String) {
+    fun runTask(rawTask: String, routineId: String? = null) {
         job?.cancel()
         // Agent loop must NOT run on Main — LLM + tree walks ANR otherwise.
         job = scope.launch(Dispatchers.Default) {
             stepsTaken = 0
+            routeTaken.clear()
+            // Voice settings can change between runs; apply them before we speak.
+            speechOutput.enabled = prefs.speakAloud.value
+            speechOutput.setLanguage(prefs.language.value)
             onRunStateChanged?.invoke(true)
             val mode = prefs.mode.value
             var outcome = TaskOutcome.Completed
@@ -83,7 +99,7 @@ class AgentOrchestrator(
 
             val session = runStore.begin(task)
             try {
-                runLoop(task, session)
+                runLoop(task, session, rawTask, routineId)
                 if (runStore.readManifest(session.runId)?.status == "running") {
                     session.end("completed")
                 }
@@ -102,10 +118,16 @@ class AgentOrchestrator(
                 Log.e(TAG, "Agent failed", e)
                 session.end("error", e.message)
                 outcome = TaskOutcome.Stopped
-                detail = "Something went wrong"
-                pointerOverlay.showStatus("Something went wrong. Nothing was changed.")
-                speechOutput.speak("Something went wrong")
+                val human = AgentErrors.humanise(e.message)
+                detail = human
+                pointerOverlay.showStatus(human, 6000)
+                speechOutput.speak(human)
             } finally {
+                if (outcome == TaskOutcome.Completed) {
+                    val routine = routineId?.let { routines.byId(it) }
+                        ?: routines.matching(rawTask)
+                    routine?.let { routines.recordRun(it.id, routeTaken.toList()) }
+                }
                 history.add(
                     TaskRecord(
                         id = session.runId,
@@ -137,6 +159,29 @@ class AgentOrchestrator(
         return "${rawTask.trim()}\n\nUser clarified: $answer"
     }
 
+    /** One short human sentence for what a tool call is doing, for the run banner. */
+    private fun describeStep(name: String, input: JsonObject): String = when (name) {
+        "tap", "tap_xy" -> "Tapping"
+        "type" -> "Typing"
+        "scroll" -> "Scrolling"
+        "swipe" -> "Swiping"
+        "open_app" -> "Opening an app"
+        "back" -> "Going back"
+        "home" -> "Going home"
+        "recents" -> "Opening recents"
+        "wait_for_change" -> "Waiting for the screen"
+        "speak" -> "Explaining"
+        "ask_user" -> "Waiting for your answer"
+        "done" -> "Finishing up"
+        else -> "Working"
+    }
+
+    /** The route a previous successful run of this task followed, if we have one. */
+    private fun knownRoute(rawTask: String, routineId: String?): List<String>? {
+        val routine = routineId?.let { routines.byId(it) } ?: routines.matching(rawTask)
+        return routine?.learnedRoute?.takeIf { it.isNotEmpty() }
+    }
+
     private fun stoppedDetail(status: String?): String = when (status) {
         "stuck" -> "Stopped — couldn't find the next step"
         "step_limit" -> "Stopped — took too many steps"
@@ -145,7 +190,12 @@ class AgentOrchestrator(
         else -> "Stopped"
     }
 
-    private suspend fun runLoop(task: String, session: RunSession) {
+    private suspend fun runLoop(
+        task: String,
+        session: RunSession,
+        rawTask: String = task,
+        routineId: String? = null,
+    ) {
         ActionLog.clear()
         ActionLog.append("TASK: $task")
         ActionLog.append("RUN: ${session.runId}")
@@ -156,6 +206,7 @@ class AgentOrchestrator(
         }
         speechOutput.speak("On it")
         pointerOverlay.showStatus("Working…")
+        onProgress?.invoke(0, "Looking at the screen")
 
         val executor = ToolExecutor(
             appContext = appContext,
@@ -176,7 +227,30 @@ class AgentOrchestrator(
         messages.add(
             ChatModels.Message(
                 role = "user",
-                content = "Task: $task",
+                content = buildString {
+                    appendLine("Task: $task")
+                    appendLine()
+                    appendLine("Mode: ${prefs.mode.value.name}")
+                    knownRoute(rawTask, routineId)?.let { route ->
+                        appendLine()
+                        appendLine("This task has been done on this phone before. What worked:")
+                        route.forEachIndexed { i, step -> appendLine("${i + 1}. $step") }
+                        appendLine(
+                            "Follow it when the screens match, but verify each step — " +
+                                "apps change and a stale route is worse than none.",
+                        )
+                    }
+                    appendLine()
+                    // Sent once, not per turn: this is what stops the model inventing
+                    // package names and then claiming an installed app is missing.
+                    appendLine("Apps installed on this phone (name → package):")
+                    appendLine(DeviceContext.installedAppsBlock(appContext))
+                    appendLine()
+                    appendLine(
+                        "If an app the user names is in this list, it IS installed. " +
+                            "Never tell the user to install something that is listed here.",
+                    )
+                },
             ),
         )
 
@@ -235,7 +309,9 @@ class AgentOrchestrator(
             val contextBlocks = mutableListOf<ChatModels.ContentBlock>(
                 ChatModels.ContentBlock.Text(
                     buildString {
-                        appendLine("Current package: $pkg")
+                        val appLabel = DeviceContext.installedApps(appContext)
+                            .firstOrNull { it.packageName == pkg }?.label
+                        appendLine("Current app: ${appLabel ?: "unknown"} ($pkg)")
                         appendLine("Screen: ${screen.width()}x${screen.height()}")
                         appendLine("Action history:")
                         appendLine(history.ifBlank { "(none)" })
@@ -278,8 +354,9 @@ class AgentOrchestrator(
                     durationMs = System.currentTimeMillis() - llmStarted,
                     error = e.message,
                 )
-                pointerOverlay.showStatus("LLM error: ${e.message?.take(60)}")
-                speechOutput.speak("I couldn't reach the language model")
+                val human = AgentErrors.humanise(e.message)
+                pointerOverlay.showStatus(human, 6000)
+                speechOutput.speak(human)
                 ActionLog.append("LLM ERROR: ${e.message}")
                 session.end("llm_error", e.message)
                 return
@@ -354,6 +431,9 @@ class AgentOrchestrator(
                 if (result.fingerprintAfter.isNotEmpty()) {
                     lastFp = result.fingerprintAfter
                 }
+
+                if (result.ok) routeTaken.add("$name ${input}".take(160))
+                onProgress?.invoke(steps, describeStep(name, input))
 
                 session.recordTool(
                     step = steps,

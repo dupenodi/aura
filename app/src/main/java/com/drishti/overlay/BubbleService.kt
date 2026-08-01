@@ -33,6 +33,7 @@ import com.drishti.MainActivity
 import com.drishti.R
 import com.drishti.agent.AgentOrchestrator
 import com.drishti.data.AuraPrefs
+import com.drishti.voice.VoiceSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -64,6 +65,10 @@ class BubbleService : Service() {
     private var orbParams: WindowManager.LayoutParams? = null
     private var composerView: View? = null
 
+    private var bannerView: StatusBannerView? = null
+    private var bannerParams: WindowManager.LayoutParams? = null
+    private var voice: VoiceSession? = null
+    private var bannerHolder: View? = null
     private var bubbleView: BubbleCardView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var bubbleHide: Runnable? = null
@@ -73,6 +78,7 @@ class BubbleService : Service() {
     private var orbY = 0
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val speech by lazy { com.drishti.voice.SpeechOutput(this) }
 
     /** Battery saver degrades the glow before it degrades the help. */
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -95,7 +101,13 @@ class BubbleService : Service() {
             scope = agentScope,
         )
         orchestrator.onRunStateChanged = { running ->
-            mainHandler.post { orbView?.busy = running }
+            mainHandler.post {
+                orbView?.busy = running
+                if (running) showBanner() else hideBanner()
+            }
+        }
+        orchestrator.onProgress = { step, message ->
+            mainHandler.post { bannerView?.bind(prefs.mode.value.shortLabel, step, message) }
         }
 
         startAsForeground()
@@ -119,7 +131,8 @@ class BubbleService : Service() {
             }
             ACTION_COMPOSE -> mainHandler.post { showComposer() }
             ACTION_RUN_TASK -> intent.getStringExtra(EXTRA_TASK)?.let { task ->
-                mainHandler.post { startTask(task) }
+                val routineId = intent.getStringExtra(EXTRA_ROUTINE_ID)
+                mainHandler.post { startTask(task, routineId) }
             }
             ACTION_SHOW -> if (orbView == null && Settings.canDrawOverlays(this)) showOrb()
         }
@@ -128,6 +141,9 @@ class BubbleService : Service() {
 
     override fun onDestroy() {
         hideComposer()
+        hideBanner()
+        voice?.cancel()
+        speech.shutdown()
         removeBubble()
         orbView?.let { runCatching { wm.removeView(it) } }
         orbView = null
@@ -203,9 +219,12 @@ class BubbleService : Service() {
         val size = dp(64)
         val view = OrbView(this).apply { applyPrefs(prefs) }
 
-        // Rest at the right edge, comfortably above the gesture bar.
-        orbX = screenWidth() - size - dp(14)
-        orbY = (screenHeight() * 0.66f).toInt()
+        // Return to where the user last parked it; otherwise rest at the right edge,
+        // comfortably above the gesture bar.
+        orbX = prefs.orbX.takeIf { it >= 0 } ?: (screenWidth() - size - dp(14))
+        orbY = prefs.orbY.takeIf { it >= 0 } ?: (screenHeight() * 0.66f).toInt()
+        orbX = orbX.coerceIn(0, (screenWidth() - size).coerceAtLeast(0))
+        orbY = orbY.coerceIn(0, (screenHeight() - size).coerceAtLeast(0))
 
         val params = overlayParams(size, size).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -218,11 +237,15 @@ class BubbleService : Service() {
         var startX = 0
         var startY = 0
         var moved = false
-        var longPressFired = false
-        val slop = dp(10)
+        var holding = false
+        // The platform's own slop and long-press timeout, so the orb feels like every
+        // other control on the phone rather than something with its own idea of a press.
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        val holdTimeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
 
-        val longPress = Runnable {
-            longPressFired = true
+        val beginHold = Runnable {
+            holding = true
+            view.animate().scaleX(1.06f).scaleY(1.06f).setDuration(120).start()
             beginListening()
         }
 
@@ -234,8 +257,8 @@ class BubbleService : Service() {
                     startX = params.x
                     startY = params.y
                     moved = false
-                    longPressFired = false
-                    mainHandler.postDelayed(longPress, LONG_PRESS_MS)
+                    holding = false
+                    mainHandler.postDelayed(beginHold, holdTimeout)
                     view.animate().scaleX(0.92f).scaleY(0.92f).setDuration(110).start()
                     true
                 }
@@ -243,10 +266,12 @@ class BubbleService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
-                    if (!moved && (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop)) {
+                    val past = kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop
+                    // While recording, small movement is just an unsteady hand — only
+                    // treat it as a drag if they haven't started talking.
+                    if (!moved && past && !holding) {
                         moved = true
-                        mainHandler.removeCallbacks(longPress)
-                        if (longPressFired) cancelListening()
+                        mainHandler.removeCallbacks(beginHold)
                     }
                     if (moved) {
                         params.x = (startX + dx).coerceIn(0, (screenWidth() - size).coerceAtLeast(0))
@@ -259,14 +284,21 @@ class BubbleService : Service() {
                     true
                 }
 
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    mainHandler.removeCallbacks(longPress)
+                MotionEvent.ACTION_UP -> {
+                    mainHandler.removeCallbacks(beginHold)
                     view.animate().scaleX(1f).scaleY(1f).setDuration(130).start()
                     when {
-                        longPressFired -> finishListening()
+                        holding -> finishListening()
                         moved -> snapToEdge(view, params, size)
                         else -> showComposer()
                     }
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    mainHandler.removeCallbacks(beginHold)
+                    view.animate().scaleX(1f).scaleY(1f).setDuration(130).start()
+                    if (holding) cancelListening()
                     true
                 }
 
@@ -299,6 +331,12 @@ class BubbleService : Service() {
                 }
                 repositionBubble()
             }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    prefs.orbX = orbX
+                    prefs.orbY = orbY
+                }
+            })
             start()
         }
     }
@@ -307,35 +345,91 @@ class BubbleService : Service() {
 
     private var listening = false
 
+    /**
+     * Press and hold: record while the finger is down, send on release.
+     *
+     * The transcript streams into the bubble as it is recognised so the user can see it
+     * being heard — the single thing that makes voice input feel trustworthy.
+     */
     private fun beginListening() {
         if (listening) return
-        listening = true
-        orbView?.listening = true
-        say("Listening — release to send", 30_000)
-        agentScope.launch {
-            val speech = com.drishti.voice.SpeechInput(this@BubbleService)
-            val text = withContext(Dispatchers.Main) { speech.listenOnce() }
-            withContext(Dispatchers.Main) {
-                orbView?.listening = false
-                if (!listening) return@withContext
-                listening = false
-                if (!text.isNullOrBlank()) {
-                    startTask(text)
-                } else {
-                    say("I didn't catch that — hold me and try again", 3000)
-                }
-            }
+
+        val session = VoiceSession(this)
+        if (!session.hasPermission()) {
+            say("I need microphone permission — tap to grant it", 5000)
+            openMicPermission()
+            return
         }
+
+        listening = true
+        voice = session
+        orbView?.listening = true
+        speech.stop()
+        say("Listening — release to send", 30_000, tag = "listening", chips = emptyList())
+
+        session.start(
+            languageTag = prefs.language.value.tag,
+            onPartial = { partial ->
+                mainHandler.post {
+                    if (listening) say("\u201C$partial\u201D", 30_000, "listening", emptyList())
+                }
+            },
+            onFinal = { text ->
+                mainHandler.post {
+                    endListening()
+                    if (text.isNotBlank()) startTask(text) else say("I didn't catch that", 2500)
+                }
+            },
+            onFailure = { reason ->
+                mainHandler.post {
+                    endListening()
+                    say(
+                        when (reason) {
+                            VoiceSession.Failure.NoPermission ->
+                                "I need microphone permission to listen"
+                            VoiceSession.Failure.Unavailable ->
+                                "Voice input isn't available on this phone — type instead"
+                            VoiceSession.Failure.NoSpeech ->
+                                "I didn't catch that — hold me and try again"
+                            VoiceSession.Failure.Error ->
+                                "Something went wrong listening — type instead"
+                        },
+                        3500,
+                    )
+                }
+            },
+        )
     }
 
+    /** Finger lifted: stop recording; the final transcript arrives via the callback. */
     private fun finishListening() {
-        // Recognition completes on its own; releasing just stops the visual hold state.
+        if (!listening) return
         orbView?.listening = false
+        voice?.stop()
     }
 
     private fun cancelListening() {
+        if (!listening) return
+        voice?.cancel()
+        endListening()
+        say("", 0)
+    }
+
+    private fun endListening() {
         listening = false
+        voice = null
         orbView?.listening = false
+    }
+
+    /** Microphone is granted in the app, so send the user there with an explanation. */
+    private fun openMicPermission() {
+        runCatching {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .putExtra("request_mic", true),
+            )
+        }
     }
 
     // ---- Composer ---------------------------------------------------------------
@@ -380,6 +474,7 @@ class BubbleService : Service() {
             TextView(this).apply {
                 text = "What do you need?"
                 textSize = 18f
+                typeface = OverlayFonts.display(context)
                 setTextColor(Color.parseColor("#F2F0FF"))
             },
         )
@@ -393,6 +488,7 @@ class BubbleService : Service() {
 
         val input = EditText(this).apply {
             hint = "Ask, or hold the orb to talk"
+            typeface = OverlayFonts.display(context)
             setTextColor(Color.parseColor("#F2F0FF"))
             setHintTextColor(Color.parseColor("#6D6A85"))
             textSize = 15f
@@ -425,6 +521,7 @@ class BubbleService : Service() {
         val send = TextView(this).apply {
             text = "Go"
             textSize = 15f
+            typeface = OverlayFonts.display(context)
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#07070B"))
             setPadding(0, dp(15), 0, dp(15))
@@ -491,10 +588,10 @@ class BubbleService : Service() {
         composerView = null
     }
 
-    private fun startTask(task: String) {
+    private fun startTask(task: String, routineId: String? = null) {
         hideComposer()
         say("On it", 1500)
-        orchestrator.runTask(task)
+        orchestrator.runTask(task, routineId)
     }
 
     // ---- Speech bubble ----------------------------------------------------------
@@ -632,6 +729,52 @@ class BubbleService : Service() {
         bubbleParams = null
     }
 
+    // ---- Run banner -------------------------------------------------------------
+
+    private fun showBanner() {
+        if (bannerView != null) return
+        val banner = StatusBannerView(this).apply {
+            bind(prefs.mode.value.shortLabel, 0, "Working out what to do")
+            setIndeterminate(true)
+            onStop = {
+                orchestrator.cancel()
+                hideBanner()
+                say("Stopped. Nothing else was changed.", 3000)
+            }
+        }
+        val params = overlayParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            gravity = Gravity.TOP
+            y = dp(48)
+            // Touchable so Stop works, but it must never swallow taps meant for the app.
+            flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        }
+        val holder = LinearLayout(this).apply {
+            setPadding(dp(12), 0, dp(12), 0)
+            addView(
+                banner,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        if (runCatching { wm.addView(holder, params) }.isFailure) return
+        bannerView = banner
+        bannerParams = params
+        bannerHolder = holder
+    }
+
+    private fun hideBanner() {
+        bannerHolder?.let { runCatching { wm.removeView(it) } }
+        bannerHolder = null
+        bannerView = null
+        bannerParams = null
+    }
+
     // ---- Plumbing ---------------------------------------------------------------
 
     private fun overlayParams(width: Int, height: Int): WindowManager.LayoutParams {
@@ -661,6 +804,7 @@ class BubbleService : Service() {
         const val ACTION_COMPOSE = "com.drishti.overlay.COMPOSE"
         const val ACTION_RUN_TASK = "com.drishti.overlay.RUN_TASK"
         private const val EXTRA_TASK = "task"
+        private const val EXTRA_ROUTINE_ID = "routine_id"
         private const val NOTIF_ID = 42
         private const val LONG_PRESS_MS = 320L
 
@@ -674,6 +818,14 @@ class BubbleService : Service() {
 
         fun openComposer(context: Context) =
             send(context, Intent(context, BubbleService::class.java).setAction(ACTION_COMPOSE))
+
+        fun runRoutine(context: Context, task: String, routineId: String) = send(
+            context,
+            Intent(context, BubbleService::class.java)
+                .setAction(ACTION_RUN_TASK)
+                .putExtra(EXTRA_TASK, task)
+                .putExtra(EXTRA_ROUTINE_ID, routineId),
+        )
 
         fun runTask(context: Context, task: String) = send(
             context,

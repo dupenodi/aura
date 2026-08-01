@@ -25,7 +25,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.drishti.data.AuraMode
 import com.drishti.data.AuraPrefs
 import com.drishti.data.AutoSpeed
+import com.drishti.data.RoutineStore
 import com.drishti.data.TaskHistory
+import com.drishti.voice.RemoteSpeech
+import com.drishti.voice.SpeechOutput
 import com.drishti.overlay.BubbleService
 import com.drishti.ui.home.HomeScreen
 import com.drishti.ui.onboarding.OnboardingFlow
@@ -33,14 +36,19 @@ import com.drishti.ui.onboarding.PermissionState
 import com.drishti.ui.settings.ModeScreen
 import com.drishti.ui.settings.PresenceScreen
 import com.drishti.ui.settings.PrivacyScreen
+import com.drishti.ui.routines.RoutinesScreen
+import com.drishti.ui.settings.LanguageScreen
 import com.drishti.ui.settings.SettingsScreen
 import com.drishti.ui.theme.AuraTheme
 
 /** Where the user currently is inside the app shell. */
-private enum class Route { Home, Settings, Mode, Presence, Privacy }
+private enum class Route { Home, Settings, Mode, Presence, Privacy, Language, Routines }
 
 /** Extra carrying a task to run straight away (launcher shortcut / assistant handoff). */
 private const val EXTRA_TASK = "task"
+
+/** Set by the overlay when the user tried to talk without granting the microphone. */
+private const val EXTRA_REQUEST_MIC = "request_mic"
 
 class MainActivity : ComponentActivity() {
 
@@ -52,7 +60,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val prefs = AuraPrefs.get(this)
         handleTaskHandoff(intent)
+        if (intent?.getBooleanExtra(EXTRA_REQUEST_MIC, false) == true) {
+            intent.removeExtra(EXTRA_REQUEST_MIC)
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
         val history = TaskHistory.get(this)
+        val routineStore = RoutineStore.get(this)
+        // Used only to ask which languages have an installed voice.
+        val tts = SpeechOutput(this)
 
         setContent {
             AuraTheme {
@@ -70,6 +85,9 @@ class MainActivity : ComponentActivity() {
                 val hideInFullscreen by prefs.hideInFullscreen.collectAsState()
                 val paused by prefs.paused.collectAsState()
                 val records by history.records.collectAsState()
+                val routines by routineStore.routines.collectAsState()
+                val language by prefs.language.collectAsState()
+                val speechProvider by prefs.speechProvider.collectAsState()
 
                 var onboarded by remember { mutableStateOf(prefs.onboardingComplete) }
                 var route by remember { mutableStateOf(Route.Home) }
@@ -110,7 +128,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 BackHandler(enabled = route != Route.Home) {
-                    route = if (route == Route.Settings) Route.Home else Route.Settings
+                    route = when (route) {
+                        Route.Settings, Route.Routines -> Route.Home
+                        else -> Route.Settings
+                    }
                 }
 
                 when (route) {
@@ -141,6 +162,9 @@ class MainActivity : ComponentActivity() {
                         onOpenMode = { route = Route.Mode },
                         onOpenPresence = { route = Route.Presence },
                         onOpenPrivacy = { route = Route.Privacy },
+                        onOpenLanguage = { route = Route.Language },
+                        onOpenRoutines = { route = Route.Routines },
+                        language = language,
                         onCycleAutoSpeed = {
                             val next = AutoSpeed.fromOrdinal(
                                 (autoSpeed.ordinal + 1) % AutoSpeed.entries.size,
@@ -165,6 +189,32 @@ class MainActivity : ComponentActivity() {
                         onOrbSkin = prefs::setOrbSkin,
                         onGlow = prefs::setGlow,
                         onBack = { route = Route.Settings },
+                    )
+
+                    Route.Language -> LanguageScreen(
+                        language = language,
+                        provider = speechProvider,
+                        providerConfigured = { RemoteSpeech.isConfigured(it) },
+                        ttsAvailable = { tts.supports(it) },
+                        onLanguage = prefs::setLanguage,
+                        onProvider = prefs::setSpeechProvider,
+                        onBack = { route = Route.Settings },
+                    )
+
+                    Route.Routines -> RoutinesScreen(
+                        routines = routines,
+                        onRun = { routine ->
+                            BubbleService.start(this@MainActivity)
+                            BubbleService.runRoutine(
+                                this@MainActivity,
+                                routine.task,
+                                routine.id,
+                            )
+                            moveTaskToBack(true)
+                        },
+                        onDelete = { routineStore.delete(it.id) },
+                        onAdd = { name, task -> routineStore.add(name, task) },
+                        onBack = { route = Route.Home },
                     )
 
                     Route.Privacy -> PrivacyScreen(

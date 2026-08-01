@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.drishti.ui.theme.GlowLevel
 import com.drishti.ui.theme.OrbSkin
+import com.drishti.voice.AuraLanguage
+import com.drishti.voice.SpeechProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -64,6 +66,22 @@ class AuraPrefs private constructor(context: Context) {
     private val _paused = MutableStateFlow(prefs.getBoolean(KEY_PAUSED, false))
     val paused: StateFlow<Boolean> = _paused
 
+    private val _language = MutableStateFlow(AuraLanguage.fromTag(prefs.getString(KEY_LANGUAGE, null)))
+    val language: StateFlow<AuraLanguage> = _language
+
+    private val _speechProvider =
+        MutableStateFlow(SpeechProvider.fromOrdinal(prefs.getInt(KEY_SPEECH_PROVIDER, 0)))
+    val speechProvider: StateFlow<SpeechProvider> = _speechProvider
+
+    /** Where the user last parked the orb; -1 means "never moved it". */
+    var orbX: Int
+        get() = prefs.getInt(KEY_ORB_X, -1)
+        set(value) = prefs.edit().putInt(KEY_ORB_X, value).apply()
+
+    var orbY: Int
+        get() = prefs.getInt(KEY_ORB_Y, -1)
+        set(value) = prefs.edit().putInt(KEY_ORB_Y, value).apply()
+
     var onboardingComplete: Boolean
         get() = prefs.getBoolean(KEY_ONBOARDED, false)
         set(value) = prefs.edit().putBoolean(KEY_ONBOARDED, value).apply()
@@ -101,6 +119,16 @@ class AuraPrefs private constructor(context: Context) {
     fun setPaused(paused: Boolean) {
         prefs.edit().putBoolean(KEY_PAUSED, paused).apply()
         _paused.value = paused
+    }
+
+    fun setLanguage(language: AuraLanguage) {
+        prefs.edit().putString(KEY_LANGUAGE, language.tag).apply()
+        _language.value = language
+    }
+
+    fun setSpeechProvider(provider: SpeechProvider) {
+        prefs.edit().putInt(KEY_SPEECH_PROVIDER, provider.ordinal).apply()
+        _speechProvider.value = provider
     }
 
     // ---- Per-app mode overrides -------------------------------------------------
@@ -141,6 +169,10 @@ class AuraPrefs private constructor(context: Context) {
         private const val KEY_HIDE_FULLSCREEN = "hide_fullscreen"
         private const val KEY_PAUSED = "paused"
         private const val KEY_ONBOARDED = "onboarded"
+        private const val KEY_ORB_X = "orb_x"
+        private const val KEY_ORB_Y = "orb_y"
+        private const val KEY_LANGUAGE = "language"
+        private const val KEY_SPEECH_PROVIDER = "speech_provider"
         private const val PREFIX_OVERRIDE = "override_"
 
         @Volatile

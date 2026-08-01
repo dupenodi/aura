@@ -65,7 +65,7 @@ class PromptImprover(
                         role = "user",
                         content = buildString {
                             appendLine("Installed apps (name → package):")
-                            appendLine(installedAppsBlock())
+                            appendLine(DeviceContext.installedAppsBlock(appContext))
                             appendLine()
                             appendLine("User request: \"$task\"")
                         },
@@ -114,23 +114,6 @@ class PromptImprover(
             )
         }.getOrElse { Improved(task = fallback) }
     }
-
-    /**
-     * Launchable apps only, capped — enough for the model to resolve "whatsapp" to a
-     * real package without turning the prompt into a phone inventory.
-     */
-    private fun installedAppsBlock(): String = runCatching {
-        val pm = appContext.packageManager
-        pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            .asSequence()
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-            .map { pm.getApplicationLabel(it).toString() to it.packageName }
-            .filter { (label, _) -> label.isNotBlank() }
-            .sortedBy { it.first.lowercase() }
-            .take(MAX_APPS)
-            .joinToString("\n") { (label, pkg) -> "$label → $pkg" }
-            .ifBlank { "(none listed)" }
-    }.getOrDefault("(unavailable)")
 
     companion object {
         private const val TAG = "PromptImprover"

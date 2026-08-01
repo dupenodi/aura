@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.drishti.data.AuraMode
 import com.drishti.data.AutoSpeed
 import com.drishti.ui.onboarding.ModeOption
+import com.drishti.voice.AuraLanguage
 import com.drishti.ui.theme.Aura
 import com.drishti.ui.theme.AuraCard
 import com.drishti.ui.theme.AuraEyebrow
@@ -87,6 +88,9 @@ fun SettingsScreen(
     onOpenMode: () -> Unit,
     onOpenPresence: () -> Unit,
     onOpenPrivacy: () -> Unit,
+    onOpenLanguage: () -> Unit,
+    onOpenRoutines: () -> Unit,
+    language: AuraLanguage,
     onCycleAutoSpeed: () -> Unit,
     onSpeakAloud: (Boolean) -> Unit,
     onHideInFullscreen: (Boolean) -> Unit,
@@ -106,6 +110,10 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            SettingsGroup("Yours") {
+                AuraRow("Routines", divider = false, onClick = onOpenRoutines)
+            }
+
             SettingsGroup("Behaviour") {
                 AuraRow("Default mode", value = mode.label, valueColor = Aura.Cyan, onClick = onOpenMode)
                 AuraRow(
@@ -139,6 +147,12 @@ fun SettingsScreen(
             }
 
             SettingsGroup("Voice & access") {
+                AuraRow(
+                    "Language & voice",
+                    value = language.label,
+                    valueColor = Aura.Cyan,
+                    onClick = onOpenLanguage,
+                )
                 AuraRow(
                     "Read steps aloud",
                     showChevron = false,

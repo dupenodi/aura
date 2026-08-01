@@ -139,6 +139,7 @@ class ConfirmPromptOverlay(private val context: Context) {
             TextView(context).apply {
                 text = question
                 textSize = 16f
+                typeface = OverlayFonts.display(context)
                 setTextColor(Color.parseColor("#F2F0FF"))
                 setLineSpacing(dp(4).toFloat(), 1f)
             },
@@ -147,6 +148,7 @@ class ConfirmPromptOverlay(private val context: Context) {
         val input = EditText(context).apply {
             hint = "Your answer"
             textSize = 15f
+            typeface = OverlayFonts.display(context)
             background = null
             setTextColor(Color.parseColor("#F2F0FF"))
             setHintTextColor(Color.parseColor("#6D6A85"))
@@ -213,6 +215,7 @@ class ConfirmPromptOverlay(private val context: Context) {
     private fun pill(label: String, primary: Boolean, onClick: () -> Unit) = TextView(context).apply {
         text = label
         textSize = 13f
+        typeface = OverlayFonts.display(context)
         gravity = Gravity.CENTER
         setPadding(dp(18), dp(11), dp(18), dp(11))
         setTextColor(

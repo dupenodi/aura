@@ -52,6 +52,12 @@ class ToolExecutor(
             else -> ""
         }
 
+        // Guide mode is a promise, not a preference: nothing that changes the phone may
+        // run. Enforced here, in one place, so no tool can quietly bypass it.
+        if (name in ACTING_TOOLS && modeFor(service.currentPackage()) == AuraMode.Guide) {
+            return guide(service, name, input)
+        }
+
         if (SafetyGate.isSensitive(name, argsText, targetHint)) {
             speechOutput.speak("This looks sensitive. Please confirm.")
             pointerOverlay.showStatus("Confirm sensitive action")
@@ -162,11 +168,6 @@ class ToolExecutor(
             ?: return Result(false, "index $index not found in last observe tree")
         val bounds = Rect(target.bounds)
         val name = target.element?.text?.takeIf { it.isNotBlank() }
-
-        if (modeFor(service.currentPackage()) == AuraMode.Guide) {
-            return guideToTarget(service, bounds, name)
-        }
-
         pointerOverlay.showTargetAt(bounds, POINTER_HOLD_MS + 400L, name?.let { "Tap \"$it\"" } ?: "Tap")
         delay(autoSpeed().stepPauseMs)
 
@@ -189,40 +190,88 @@ class ToolExecutor(
     }
 
     /**
-     * Guide mode: point at the target and wait for the user's own finger.
+     * Guide mode: turn whatever the model wanted to do into an instruction for the user,
+     * highlight the target where there is one, and wait for them to do it.
      *
-     * "Points, waits, never taps" is a promise, so this must never fall back to a
-     * gesture. We watch the accessibility tree for a change to know the user acted;
-     * if they don't within [GUIDE_WAIT_MS] we hand control back to the model with an
-     * honest report rather than silently doing it ourselves.
+     * Nothing here touches the phone. If the user doesn't act within [GUIDE_WAIT_MS] we
+     * report that honestly instead of quietly doing it ourselves.
      */
-    private suspend fun guideToTarget(
+    private suspend fun guide(
         service: ScreenAgentAccessibilityService,
-        bounds: Rect,
-        name: String?,
+        tool: String,
+        input: JsonObject,
     ): Result {
-        val instruction = name?.let { "Tap \"$it\"" } ?: "Tap the highlighted button"
-        pointerOverlay.showTargetAt(bounds, GUIDE_WAIT_MS, instruction)
+        var bounds: Rect? = null
+        val instruction: String = when (tool) {
+            "tap" -> {
+                val index = input.int("index")
+                    ?: return Result(false, "missing index")
+                val target = service.resolveTapTarget(index)
+                    ?: return Result(false, "index $index not found in last observe tree")
+                bounds = Rect(target.bounds)
+                target.element?.text?.takeIf { it.isNotBlank() }
+                    ?.let { "Tap \"$it\"" } ?: "Tap the highlighted button"
+            }
+
+            "tap_xy" -> {
+                val x = input.int("x") ?: return Result(false, "missing x")
+                val y = input.int("y") ?: return Result(false, "missing y")
+                bounds = Rect(x - 40, y - 40, x + 40, y + 40)
+                "Tap here"
+            }
+
+            "type" -> {
+                val text = input.string("text") ?: return Result(false, "missing text")
+                input.int("index")?.let { idx ->
+                    service.resolveTapTarget(idx)?.let { bounds = Rect(it.bounds) }
+                }
+                "Type: $text"
+            }
+
+            "scroll" -> "Scroll ${input.string("direction") ?: "down"}"
+            "swipe" -> "Swipe on the screen"
+            "open_app" -> {
+                val requested = input.string("package_name").orEmpty()
+                val label = appLabelFor(requested) ?: requested
+                "Open $label"
+            }
+
+            "back" -> "Go back"
+            "home" -> "Go to the home screen"
+            "recents" -> "Open recent apps"
+            else -> "Do the next step"
+        }
+
+        bounds?.let { pointerOverlay.showTargetAt(it, GUIDE_WAIT_MS, instruction) }
         pointerOverlay.showStatus(instruction, GUIDE_WAIT_MS)
         speechOutput.speak(instruction)
 
         val before = TreeJson.fingerprint(service.captureAgentTree())
+        val beforePackage = service.currentPackage()
         val deadline = SystemClock.elapsedRealtime() + GUIDE_WAIT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
             delay(GUIDE_POLL_MS)
             val now = TreeJson.fingerprint(service.captureAgentTree())
-            if (now != before) {
+            if (now != before || service.currentPackage() != beforePackage) {
                 pointerOverlay.hide()
-                return Result(true, "user tapped \"${name ?: "the target"}\"; screen advanced")
+                return Result(true, "user did it (\"$instruction\"); the screen moved on")
             }
         }
         pointerOverlay.hide()
         return Result(
             false,
-            "Guide mode: pointed at \"${name ?: "the target"}\" but the user has not tapped yet. " +
-                "Do not retry the same tap; call done() and let them finish.",
+            "Guide mode: told the user \"$instruction\" but nothing has changed yet. " +
+                "You cannot do it for them. Do not repeat the same step — call done() " +
+                "and leave them where they are.",
         )
     }
+
+    /** Human-readable app name for a package the model named, for instructions. */
+    private fun appLabelFor(requested: String): String? = runCatching {
+        val pm = appContext.packageManager
+        val resolved = DeviceContext.resolve(appContext, requested) ?: return null
+        pm.getApplicationLabel(pm.getApplicationInfo(resolved, 0)).toString()
+    }.getOrNull()
 
     private suspend fun tapXy(x: Int?, y: Int?): Result {
         if (x == null || y == null) return Result(false, "missing x/y")
@@ -239,7 +288,7 @@ class ToolExecutor(
     ): Result {
         if (packageName.isNullOrBlank()) return Result(false, "missing package_name")
         return try {
-            val resolved = resolvePackage(packageName)
+            val resolved = DeviceContext.resolve(appContext, packageName)
                 ?: return Result(
                     false,
                     "no installed app matches \"$packageName\" — pick a different app, " +
@@ -268,35 +317,6 @@ class ToolExecutor(
     }
 
 
-    /**
-     * Maps whatever the model asked for onto something actually installed.
-     *
-     * The model guesses package names from memory and is often close but not exact
-     * ("org.telegram.messenger" when the phone has a fork, or just "Telegram"). Falling
-     * back to a label/package match turns a dead end into a working launch, which matters
-     * more than being strict about the argument.
-     */
-    private fun resolvePackage(requested: String): String? {
-        val pm = appContext.packageManager
-        if (pm.getLaunchIntentForPackage(requested) != null) return requested
-
-        val needle = requested.substringAfterLast('.').lowercase().ifBlank { requested.lowercase() }
-        val launchable = pm.getInstalledApplications(0)
-            .asSequence()
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-
-        // Prefer an exact label match, then a package/label containment match.
-        val byLabel = launchable.firstOrNull {
-            pm.getApplicationLabel(it).toString().equals(needle, ignoreCase = true)
-        }
-        if (byLabel != null) return byLabel.packageName
-
-        return launchable.firstOrNull {
-            it.packageName.lowercase().contains(needle) ||
-                pm.getApplicationLabel(it).toString().lowercase().contains(needle)
-        }?.packageName
-    }
-
     private fun JsonObject.string(key: String): String? =
         this[key]?.jsonPrimitive?.contentOrNull
 
@@ -314,6 +334,12 @@ class ToolExecutor(
         private const val POINTER_HOLD_MS = 750L
         private const val GUIDE_WAIT_MS = 20_000L
         private const val GUIDE_POLL_MS = 350L
+
+        /** Tools that change the phone. In Guide mode none of these may run. */
+        private val ACTING_TOOLS = setOf(
+            "tap", "tap_xy", "type", "swipe", "scroll",
+            "open_app", "back", "home", "recents",
+        )
         private const val OPEN_APP_WAIT_MS = 4_000L
         private const val OPEN_APP_POLL_MS = 200L
     }

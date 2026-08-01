@@ -546,13 +546,30 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
                 else -> findEditableNode(root)?.also { writeOwned = it } ?: return false
             }
 
-            val setOk = setTextOnNode(writeTarget, text, clear)
-            if (setOk) return true
+            if (setTextOnNode(writeTarget, text, clear)) return true
+            if (pasteViaClipboard(writeTarget, text, clear) &&
+                verifyTextLanded(writeTarget, text)
+            ) {
+                return true
+            }
 
-            val pasteOk = pasteViaClipboard(writeTarget, text, clear)
-            if (pasteOk) return true
+            // Last resort: some fields (ride-hailing search boxes especially) only wake up
+            // for a genuine touch, not ACTION_CLICK. Tap them for real, then try again.
+            val bounds = Rect().also { writeTarget.getBoundsInScreen(it) }
+            if (!bounds.isEmpty) {
+                GestureController.tap(bounds.centerX(), bounds.centerY())
+                delay(FOCUS_SETTLE_MS)
+                val refocused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                val retryTarget = refocused?.takeIf { it.isEditable } ?: writeTarget
+                if (setTextOnNode(retryTarget, text, clear)) return true
+                if (pasteViaClipboard(retryTarget, text, clear) &&
+                    verifyTextLanded(retryTarget, text)
+                ) {
+                    return true
+                }
+            }
 
-            Log.w(TAG, "inputText failed SET_TEXT and PASTE for len=${text.length}")
+            Log.w(TAG, "inputText failed SET_TEXT, PASTE and touch retry for len=${text.length}")
             return false
         } catch (e: Exception) {
             Log.e(TAG, "Error setting text: ${e.message}")
@@ -667,8 +684,22 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
         val setTextSuccess =
             targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         if (!setTextSuccess) return false
+        // Plenty of apps accept ACTION_SET_TEXT and then ignore it — custom search fields
+        // especially. Trusting the return value is why typing "succeeded" while the field
+        // stayed empty, so confirm the text actually landed before claiming success.
+        if (!verifyTextLanded(targetNode, text)) return false
         setSelectionOnFocusedInput(targetNode, desiredSelection)
         return true
+    }
+
+    /** Re-reads the node and checks our text is really in it. */
+    private fun verifyTextLanded(node: AccessibilityNodeInfo, expected: String): Boolean {
+        if (expected.isEmpty()) return true
+        return runCatching {
+            node.refresh()
+            val actual = node.text?.toString().orEmpty()
+            actual.contains(expected, ignoreCase = true)
+        }.getOrDefault(true) // A node we can't re-read is not evidence of failure.
     }
 
     private fun pasteViaClipboard(

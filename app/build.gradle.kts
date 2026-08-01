@@ -32,7 +32,7 @@ val openRouterModel: String =
 
 val geminiApiKey: String = localProperties.getProperty("GEMINI_API_KEY") ?: ""
 val geminiModel: String =
-    localProperties.getProperty("GEMINI_MODEL") ?: "gemini-flash-latest"
+    localProperties.getProperty("GEMINI_MODEL") ?: "gemini-3.5-flash"
 
 val localLlmBaseUrl: String = localProperties.getProperty("LOCAL_LLM_BASE_URL") ?: ""
 val localLlmModel: String =
@@ -44,7 +44,7 @@ val llmProvider: String =
 
 // Cheap, fast model used to rewrite the user's request before the agent loop runs.
 val fastModel: String =
-    localProperties.getProperty("LLM_FAST_MODEL") ?: "gemini-flash-lite-latest"
+    localProperties.getProperty("LLM_FAST_MODEL") ?: "gemini-3.5-flash"
 
 val llmMaxTokens: Int =
     localProperties.getProperty("LLM_MAX_TOKENS")?.toIntOrNull() ?: 1024

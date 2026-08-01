@@ -44,7 +44,7 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
             textSize = 9.5f
             setTextColor(Color.parseColor("#7EF2FF"))
             letterSpacing = 0.14f
-            typeface = android.graphics.Typeface.MONOSPACE
+            typeface = OverlayFonts.mono(context)
             visibility = View.GONE
         }
         addView(tagView)
@@ -54,6 +54,7 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
             setTextColor(Color.parseColor("#ECEAF5"))
             setLineSpacing(dp(4f).toFloat(), 1f)
             maxWidth = dp(250f)
+            typeface = OverlayFonts.display(context)
         }
         addView(
             messageView,
@@ -83,7 +84,9 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
     }
 
     fun bind(message: String, tag: String?, chips: List<BubbleChip>) {
-        messageView.text = message
+        // One sentence at a time is a design rule, and it doubles as a safety net: no
+        // stray provider payload can ever turn the bubble into a wall of text.
+        messageView.text = message.trim().replace(Regex("\\s+"), " ").take(MAX_MESSAGE_CHARS)
         if (tag.isNullOrBlank()) {
             tagView.visibility = View.GONE
         } else {
@@ -100,9 +103,14 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
         }
     }
 
+    private companion object {
+        const val MAX_MESSAGE_CHARS = 180
+    }
+
     private fun buildChip(chip: BubbleChip): View = TextView(context).apply {
         text = chip.label
         textSize = 12.5f
+        typeface = OverlayFonts.display(context)
         gravity = Gravity.CENTER
         setPadding(dp(14f), dp(10f), dp(14f), dp(10f))
         setTextColor(

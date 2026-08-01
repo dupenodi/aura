@@ -9,9 +9,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.drishti.R
 import androidx.compose.ui.unit.sp
 
 /**
@@ -102,11 +105,39 @@ enum class GlowLevel(val label: String, val fraction: Float, val scale: Float) {
 }
 
 /**
- * Space Grotesk / IBM Plex Mono aren't bundled, so we lean on the platform's
- * geometric sans and monospace, which carry the same character at these sizes.
+ * The design's typefaces, bundled.
+ *
+ * Space Grotesk ships as a variable font, so each weight is the same file pinned to a
+ * different point on the weight axis rather than a separate static cut.
  */
-private val Display = FontFamily.SansSerif
-val AuraMono = FontFamily.Monospace
+@OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+private val Display = FontFamily(
+    Font(
+        R.font.space_grotesk,
+        FontWeight.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(400)),
+    ),
+    Font(
+        R.font.space_grotesk,
+        FontWeight.Medium,
+        variationSettings = FontVariation.Settings(FontVariation.weight(500)),
+    ),
+    Font(
+        R.font.space_grotesk,
+        FontWeight.SemiBold,
+        variationSettings = FontVariation.Settings(FontVariation.weight(600)),
+    ),
+    Font(
+        R.font.space_grotesk,
+        FontWeight.Bold,
+        variationSettings = FontVariation.Settings(FontVariation.weight(700)),
+    ),
+)
+
+val AuraMono = FontFamily(
+    Font(R.font.ibm_plex_mono, FontWeight.Normal),
+    Font(R.font.ibm_plex_mono_medium, FontWeight.Medium),
+)
 
 private val AuraTypography = Typography(
     displayLarge = TextStyle(
