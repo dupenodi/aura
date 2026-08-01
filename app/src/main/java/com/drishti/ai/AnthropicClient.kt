@@ -1,119 +1,132 @@
 package com.drishti.ai
 
 import com.drishti.BuildConfig
-import com.drishti.debug.RingBufferLogger
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.logging.HttpLoggingInterceptor
-import retrofit2.Retrofit
-import retrofit2.http.Body
-import retrofit2.http.Headers
-import retrofit2.http.POST
-import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
-import javax.inject.Inject
-import javax.inject.Singleton
 
-interface AnthropicApi {
-    @Headers("Content-Type: application/json")
-    @POST("v1/messages")
-    suspend fun createMessage(@Body body: AnthropicMessagesRequest): AnthropicMessagesResponse
-}
+class AnthropicClient(
+    private val apiKeyProvider: () -> String = { ApiKeyStore.resolve("anthropic") },
+    private val model: String = BuildConfig.ANTHROPIC_MODEL,
+) : ChatBackend {
+    override val providerId: String = "anthropic"
 
-/**
- * Anthropic Messages API client (tool use + vision).
- * Key comes from [BuildConfig.ANTHROPIC_API_KEY] (local.properties → buildConfigField).
- *
- * Model: [MODEL] = claude-sonnet-4-5 (current Sonnet; Messages API + tools).
- * Fallback alias if needed: claude-sonnet-4-20250514
- */
-@Singleton
-class AnthropicClient @Inject constructor(
-    private val api: AnthropicApi,
-) {
-    fun hasApiKey(): Boolean = BuildConfig.ANTHROPIC_API_KEY.isNotBlank()
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
 
-    fun missingKeyMessage(): String =
-        "ANTHROPIC_API_KEY is empty. Add ANTHROPIC_API_KEY=sk-ant-... to local.properties and rebuild the app."
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
 
-    suspend fun chat(
-        messages: List<ChatMessage>,
-        tools: List<ToolSpec>,
-        model: String = MODEL,
-        maxTokens: Int = 4096,
-    ): Result<AnthropicMessagesResponse> {
-        if (!hasApiKey()) {
-            return Result.failure(IllegalStateException(missingKeyMessage()))
+    override fun createMessage(
+        system: String,
+        messages: List<ChatModels.Message>,
+        tools: List<JsonObject>,
+        maxTokens: Int,
+    ): ChatModels.Response {
+        val key = apiKeyProvider().trim()
+        require(key.isNotEmpty()) { "ANTHROPIC_API_KEY is missing" }
+
+        val body = buildJsonObject {
+            put("model", model)
+            put("max_tokens", maxTokens)
+            put("system", system)
+            put("tools", buildJsonArray { tools.forEach { add(it) } })
+            put(
+                "messages",
+                buildJsonArray {
+                    messages.forEach { msg ->
+                        add(
+                            buildJsonObject {
+                                put("role", msg.role)
+                                put("content", msg.contentToJson())
+                            },
+                        )
+                    }
+                },
+            )
         }
-        return runCatching {
-            val converted = AnthropicMessageAdapter.toAnthropicRequest(messages)
-            if (converted.messages.isEmpty()) {
-                error("No user/assistant messages to send to Anthropic")
+
+        val request = Request.Builder()
+            .url("https://api.anthropic.com/v1/messages")
+            .addHeader("x-api-key", key)
+            .addHeader("anthropic-version", "2023-06-01")
+            .addHeader("content-type", "application/json")
+            .post(json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON))
+            .build()
+
+        http.newCall(request).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                error("Anthropic HTTP ${resp.code}: $raw")
             }
-            RingBufferLogger.log(
-                "anthropic",
-                "chat model=$model messages=${converted.messages.size} tools=${tools.size}",
-            )
-            val response = api.createMessage(
-                AnthropicMessagesRequest(
-                    model = model,
-                    maxTokens = maxTokens,
-                    system = converted.system,
-                    messages = converted.messages,
-                    tools = AnthropicToolAdapter.fromOpenAiTools(tools),
-                    toolChoice = AnthropicToolChoice(type = "auto"),
-                ),
-            )
-            if (response.error != null) {
-                error(response.error.message ?: "Anthropic error")
-            }
-            if (response.content.isEmpty()) {
-                error("Anthropic returned empty content")
-            }
-            response
-        }.onFailure { e ->
-            RingBufferLogger.log("anthropic", "error=${e.message}")
+            val parsed = json.decodeFromString(ChatModels.Response.serializer(), raw)
+            return parsed.copy(provider = providerId)
         }
     }
 
-    companion object {
-        /** Current solid Sonnet model for Messages API + tool use. */
-        const val MODEL = "claude-sonnet-4-5"
-
-        const val BASE_URL = "https://api.anthropic.com/"
-        const val API_VERSION = "2023-06-01"
-
-        fun createOkHttp(apiKey: String): OkHttpClient {
-            val logging = HttpLoggingInterceptor { msg ->
-                val trimmed = if (msg.length > 400) msg.take(400) + "…" else msg
-                RingBufferLogger.log("http", trimmed)
-            }.apply {
-                level = HttpLoggingInterceptor.Level.BASIC
-            }
-            return OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(120, TimeUnit.SECONDS)
-                .writeTimeout(120, TimeUnit.SECONDS)
-                .addInterceptor { chain ->
-                    val req = chain.request().newBuilder()
-                        .header("x-api-key", apiKey)
-                        .header("anthropic-version", API_VERSION)
-                        .build()
-                    chain.proceed(req)
+    private fun ChatModels.Message.contentToJson(): JsonElement = when (val c = content) {
+        is String -> JsonPrimitive(c)
+        is List<*> -> buildJsonArray {
+            c.forEach { block ->
+                when (block) {
+                    is ChatModels.ContentBlock.Text -> add(
+                        buildJsonObject {
+                            put("type", "text")
+                            put("text", block.text)
+                        },
+                    )
+                    is ChatModels.ContentBlock.Image -> add(
+                        buildJsonObject {
+                            put("type", "image")
+                            put(
+                                "source",
+                                buildJsonObject {
+                                    put("type", "base64")
+                                    put("media_type", block.mediaType)
+                                    put("data", block.base64)
+                                },
+                            )
+                        },
+                    )
+                    is ChatModels.ContentBlock.ToolUse -> add(
+                        buildJsonObject {
+                            put("type", "tool_use")
+                            put("id", block.id)
+                            put("name", block.name)
+                            put("input", block.input)
+                        },
+                    )
+                    is ChatModels.ContentBlock.ToolResult -> add(
+                        buildJsonObject {
+                            put("type", "tool_result")
+                            put("tool_use_id", block.toolUseId)
+                            put("content", block.content)
+                            if (block.isError) put("is_error", true)
+                        },
+                    )
+                    else -> Unit
                 }
-                .addInterceptor(logging)
-                .build()
+            }
         }
+        else -> JsonPrimitive(c.toString())
+    }
 
-        fun createApi(client: OkHttpClient, json: Json): AnthropicApi {
-            val contentType = "application/json".toMediaType()
-            return Retrofit.Builder()
-                .baseUrl(BASE_URL)
-                .client(client)
-                .addConverterFactory(json.asConverterFactory(contentType))
-                .build()
-                .create(AnthropicApi::class.java)
-        }
+    companion object {
+        private val JSON = "application/json".toMediaType()
     }
 }

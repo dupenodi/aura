@@ -1,5 +1,5 @@
 ## Copy to local.properties (gitignored) and fill in values.
-sdk.dir=C:\\Users\\YOUR_USER\\AppData\\Local\\Android\\Sdk
+sdk.dir=/path/to/Android/Sdk
 
 # TODO: Move API keys behind a server-side proxy before any real distribution.
 # Do not commit real keys. Client-side keys are only for local development.
@@ -7,11 +7,23 @@ sdk.dir=C:\\Users\\YOUR_USER\\AppData\\Local\\Android\\Sdk
 # After changing keys: rebuild the APK (BuildConfig is generated at compile time).
 #   ./gradlew :app:assembleDebug
 
-OPENAI_API_KEY=sk-your-key-here
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+# Provider selection: auto | local | openrouter | anthropic | openai
+# auto tries: local → openrouter → anthropic → openai (skips unconfigured)
+LLM_PROVIDER=auto
 
-# Preferred for STT (Saaras v3) + TTS (Bulbul v3). Falls back to Deepgram → OpenAI.
-SARVAM_API_KEY=your-sarvam-key-here
+# Local OpenAI-compatible server (Ollama / LM Studio / vLLM)
+# Phone via USB: adb reverse tcp:11434 tcp:11434  then use http://127.0.0.1:11434/v1
+# Emulator: http://10.0.2.2:11434/v1
+# Same Wi‑Fi LAN: http://192.168.x.x:11434/v1
+LOCAL_LLM_BASE_URL=
+LOCAL_LLM_MODEL=llama3.2
+LOCAL_LLM_API_KEY=
 
-# Secondary for STT (Nova-2) + TTS (Aura). Falls back to OpenAI if missing/fails.
-DEEPGRAM_API_KEY=your-deepgram-key-here
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=google/gemini-2.5-flash
+
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini

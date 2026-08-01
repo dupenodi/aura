@@ -5,8 +5,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
-    id("com.google.dagger.hilt.android")
-    id("com.google.devtools.ksp")
 }
 
 val localProperties = Properties().apply {
@@ -17,14 +15,41 @@ val localProperties = Properties().apply {
 }
 
 // TODO: Move API keys behind a server-side proxy before any real distribution.
-// Shipping API keys in the client APK is not acceptable for production.
 fun escapeBuildConfig(value: String): String =
     value.replace("\\", "\\\\").replace("\"", "\\\"")
 
-val openAiApiKey: String = localProperties.getProperty("OPENAI_API_KEY") ?: ""
 val anthropicApiKey: String = localProperties.getProperty("ANTHROPIC_API_KEY") ?: ""
-val deepgramApiKey: String = localProperties.getProperty("DEEPGRAM_API_KEY") ?: ""
-val sarvamApiKey: String = localProperties.getProperty("SARVAM_API_KEY") ?: ""
+val anthropicModel: String =
+    localProperties.getProperty("ANTHROPIC_MODEL") ?: "claude-sonnet-4-20250514"
+
+val openAiApiKey: String = localProperties.getProperty("OPENAI_API_KEY") ?: ""
+val openAiModel: String =
+    localProperties.getProperty("OPENAI_MODEL") ?: "gpt-4o-mini"
+
+val openRouterApiKey: String = localProperties.getProperty("OPENROUTER_API_KEY") ?: ""
+val openRouterModel: String =
+    localProperties.getProperty("OPENROUTER_MODEL") ?: "google/gemini-2.5-flash"
+
+val geminiApiKey: String = localProperties.getProperty("GEMINI_API_KEY") ?: ""
+val geminiModel: String =
+    localProperties.getProperty("GEMINI_MODEL") ?: "gemini-flash-latest"
+
+val localLlmBaseUrl: String = localProperties.getProperty("LOCAL_LLM_BASE_URL") ?: ""
+val localLlmModel: String =
+    localProperties.getProperty("LOCAL_LLM_MODEL") ?: "llama3.2"
+val localLlmApiKey: String = localProperties.getProperty("LOCAL_LLM_API_KEY") ?: ""
+
+val llmProvider: String =
+    localProperties.getProperty("LLM_PROVIDER") ?: "auto"
+
+// Cheap, fast model used to rewrite the user's request before the agent loop runs.
+val fastModel: String =
+    localProperties.getProperty("LLM_FAST_MODEL") ?: "gemini-flash-lite-latest"
+
+val llmMaxTokens: Int =
+    localProperties.getProperty("LLM_MAX_TOKENS")?.toIntOrNull() ?: 1024
+val agentMaxSteps: Int =
+    localProperties.getProperty("AGENT_MAX_STEPS")?.toIntOrNull() ?: 20
 
 android {
     namespace = "com.drishti"
@@ -32,17 +57,28 @@ android {
 
     defaultConfig {
         applicationId = "com.drishti"
-        minSdk = 30
+        minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField("String", "OPENAI_API_KEY", "\"${escapeBuildConfig(openAiApiKey)}\"")
         buildConfigField("String", "ANTHROPIC_API_KEY", "\"${escapeBuildConfig(anthropicApiKey)}\"")
-        buildConfigField("String", "DEEPGRAM_API_KEY", "\"${escapeBuildConfig(deepgramApiKey)}\"")
-        buildConfigField("String", "SARVAM_API_KEY", "\"${escapeBuildConfig(sarvamApiKey)}\"")
+        buildConfigField("String", "ANTHROPIC_MODEL", "\"${escapeBuildConfig(anthropicModel)}\"")
+        buildConfigField("String", "OPENAI_API_KEY", "\"${escapeBuildConfig(openAiApiKey)}\"")
+        buildConfigField("String", "OPENAI_MODEL", "\"${escapeBuildConfig(openAiModel)}\"")
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"${escapeBuildConfig(openRouterApiKey)}\"")
+        buildConfigField("String", "OPENROUTER_MODEL", "\"${escapeBuildConfig(openRouterModel)}\"")
+        buildConfigField("String", "GEMINI_API_KEY", "\"${escapeBuildConfig(geminiApiKey)}\"")
+        buildConfigField("String", "GEMINI_MODEL", "\"${escapeBuildConfig(geminiModel)}\"")
+        buildConfigField("String", "LOCAL_LLM_BASE_URL", "\"${escapeBuildConfig(localLlmBaseUrl)}\"")
+        buildConfigField("String", "LOCAL_LLM_MODEL", "\"${escapeBuildConfig(localLlmModel)}\"")
+        buildConfigField("String", "LOCAL_LLM_API_KEY", "\"${escapeBuildConfig(localLlmApiKey)}\"")
+        buildConfigField("String", "LLM_PROVIDER", "\"${escapeBuildConfig(llmProvider)}\"")
+        buildConfigField("String", "LLM_FAST_MODEL", "\"${escapeBuildConfig(fastModel)}\"")
+        buildConfigField("int", "LLM_MAX_TOKENS", "$llmMaxTokens")
+        buildConfigField("int", "AGENT_MAX_STEPS", "$agentMaxSteps")
     }
 
     buildTypes {
@@ -92,17 +128,13 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
-    implementation("com.squareup.retrofit2:retrofit:2.11.0")
-    implementation("com.jakewharton.retrofit:retrofit2-kotlinx-serialization-converter:1.0.0")
-
-    implementation("com.google.dagger:hilt-android:2.52")
-    ksp("com.google.dagger:hilt-compiler:2.52")
-    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
 
     testImplementation("junit:junit:4.13.2")
 }

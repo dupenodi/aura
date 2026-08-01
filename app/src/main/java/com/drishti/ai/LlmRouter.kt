@@ -1,126 +1,148 @@
 package com.drishti.ai
 
-import com.drishti.debug.RingBufferLogger
-import retrofit2.HttpException
-import java.io.IOException
-import java.net.SocketTimeoutException
-import javax.inject.Inject
-import javax.inject.Singleton
-
-enum class LlmProvider {
-    OpenAI,
-    Anthropic,
-}
-
-data class LlmChatResult(
-    val provider: LlmProvider,
-    val model: String,
-    val message: ChatMessage,
-    val finishReason: String?,
-)
+import android.util.Log
+import com.drishti.BuildConfig
+import kotlinx.serialization.json.JsonObject
 
 /**
- * Provider router: OpenAI first when keyed; fall back to Anthropic on missing key
- * or network / 5xx / 429 / auth failures.
+ * Routes chat requests across providers.
+ *
+ * LLM_PROVIDER values:
+ * - auto (default): try local → openrouter → gemini → anthropic → openai (skip unconfigured)
+ * - local | openrouter | gemini | anthropic | openai: force that provider
  */
-@Singleton
-class LlmRouter @Inject constructor(
-    private val openAi: OpenAiClient,
-    private val anthropic: AnthropicClient,
-) {
-    fun hasOpenAiKey(): Boolean = openAi.hasApiKey()
-    fun hasAnthropicKey(): Boolean = anthropic.hasApiKey()
-    fun hasAnyKey(): Boolean = hasOpenAiKey() || hasAnthropicKey()
+class LlmRouter(
+    private val preferred: String = BuildConfig.LLM_PROVIDER,
+) : ChatBackend {
+    override val providerId: String = "router"
 
-    fun missingKeysMessage(): String =
-        "No LLM API key configured. Add OPENAI_API_KEY and/or ANTHROPIC_API_KEY to local.properties and rebuild the app."
+    private val backends: List<ChatBackend> by lazy { buildBackends(fast = false) }
 
     /**
-     * @param preferAnthropic when true, skip OpenAI for the rest of a run after a fallback.
+     * The same provider chain but pointed at a small, cheap model — used for quick
+     * side-tasks like rewriting the user's request, where the big model would be
+     * slower and more expensive for no benefit.
      */
-    suspend fun chat(
-        messages: List<ChatMessage>,
-        tools: List<ToolSpec>,
-        openAiModel: String,
-        preferAnthropic: Boolean = false,
-    ): Result<LlmChatResult> {
-        val tryOpenAi = hasOpenAiKey() && !preferAnthropic
-        if (tryOpenAi) {
-            val openAiResult = openAi.chat(
-                model = openAiModel,
-                messages = messages,
-                tools = tools,
-                parallelToolCalls = false,
-            )
-            openAiResult.onSuccess { response ->
-                val choice = response.choices.first()
-                RingBufferLogger.log("llm", "provider=OpenAI model=${response.model ?: openAiModel}")
-                return Result.success(
-                    LlmChatResult(
-                        provider = LlmProvider.OpenAI,
-                        model = response.model ?: openAiModel,
-                        message = choice.message,
-                        finishReason = choice.finishReason,
-                    ),
-                )
-            }
-            val err = openAiResult.exceptionOrNull()
-            if (err != null && shouldFallback(err)) {
-                RingBufferLogger.log(
-                    "llm",
-                    "OpenAI failed (${err.message}); falling back to Anthropic",
-                )
-            } else if (err != null) {
-                return Result.failure(err)
-            }
-        } else if (!hasOpenAiKey()) {
-            RingBufferLogger.log("llm", "OPENAI_API_KEY blank; using Anthropic if available")
+    private val fastBackends: List<ChatBackend> by lazy { buildBackends(fast = true) }
+
+    fun fastBackend(): ChatBackend? {
+        val want = preferred.trim().lowercase()
+        val chain = if (want == "auto" || want.isEmpty()) {
+            fastBackends
+        } else {
+            fastBackends.filter { it.providerId == want }.ifEmpty { fastBackends }
+        }
+        return chain.firstOrNull()
+    }
+
+    override fun createMessage(
+        system: String,
+        messages: List<ChatModels.Message>,
+        tools: List<JsonObject>,
+        maxTokens: Int,
+    ): ChatModels.Response {
+        val chain = selectChain()
+        require(chain.isNotEmpty()) {
+            "No LLM providers configured. Set LOCAL_LLM_BASE_URL and/or API keys in local.properties."
         }
 
-        if (!hasAnthropicKey()) {
-            val msg = when {
-                !hasAnyKey() -> missingKeysMessage()
-                else -> "OpenAI failed and ANTHROPIC_API_KEY is empty. Add ANTHROPIC_API_KEY=sk-ant-... to local.properties and rebuild."
+        var lastError: Throwable? = null
+        for (backend in chain) {
+            try {
+                Log.i(TAG, "Trying provider=${backend.providerId}")
+                return backend.createMessage(system, messages, tools, maxTokens)
+            } catch (e: Exception) {
+                Log.w(TAG, "Provider ${backend.providerId} failed: ${e.message}")
+                lastError = e
             }
-            return Result.failure(IllegalStateException(msg))
         }
+        throw lastError ?: IllegalStateException("All LLM providers failed")
+    }
 
-        return anthropic.chat(messages = messages, tools = tools).map { response ->
-            val model = response.model ?: AnthropicClient.MODEL
-            RingBufferLogger.log("llm", "provider=Anthropic model=$model")
-            LlmChatResult(
-                provider = LlmProvider.Anthropic,
-                model = model,
-                message = AnthropicMessageAdapter.fromAnthropicResponse(response),
-                finishReason = response.stopReason,
-            )
+    fun availableProviders(): List<String> = backends.map { it.providerId }
+
+    fun selectedProviderIds(): List<String> = selectChain().map { it.providerId }
+
+    private fun selectChain(): List<ChatBackend> {
+        val want = preferred.trim().lowercase()
+        return when (want) {
+            "auto", "" -> backends
+            else -> {
+                val forced = backends.filter { it.providerId == want }
+                if (forced.isNotEmpty()) forced else backends
+            }
         }
     }
 
-    fun shouldFallback(error: Throwable): Boolean {
-        when (error) {
-            is IllegalStateException -> {
-                // Missing key or empty choices / API error body — try Anthropic.
-                return true
-            }
-            is SocketTimeoutException, is IOException -> return true
-            is HttpException -> {
-                val code = error.code()
-                // Include 400 so a bad OpenAI payload / model id can still fall back to Anthropic.
-                return code == 400 || code == 401 || code == 403 || code == 429 || code >= 500
-            }
+    private fun buildBackends(fast: Boolean): List<ChatBackend> {
+        val list = mutableListOf<ChatBackend>()
+        val fastModel = BuildConfig.LLM_FAST_MODEL
+
+        val localBase = BuildConfig.LOCAL_LLM_BASE_URL.trim()
+        if (localBase.isNotEmpty()) {
+            list.add(
+                OpenAiCompatibleClient(
+                    providerId = "local",
+                    baseUrl = localBase,
+                    // A local model is already cheap; no separate fast variant needed.
+                    model = BuildConfig.LOCAL_LLM_MODEL.ifBlank { "llama3.2" },
+                    apiKeyProvider = { ApiKeyStore.resolve("local").ifBlank { "ollama" } },
+                    allowEmptyKey = true,
+                ),
+            )
         }
-        // Retrofit sometimes wraps; walk causes.
-        var cause = error.cause
-        while (cause != null) {
-            if (cause is HttpException) {
-                val code = cause.code()
-                return code == 400 || code == 401 || code == 403 || code == 429 || code >= 500
-            }
-            if (cause is IOException) return true
-            cause = cause.cause
+
+        if (ApiKeyStore.resolve("openrouter").isNotBlank()) {
+            list.add(
+                OpenAiCompatibleClient(
+                    providerId = "openrouter",
+                    baseUrl = "https://openrouter.ai/api/v1",
+                    model = if (fast) "google/$fastModel" else BuildConfig.OPENROUTER_MODEL,
+                    apiKeyProvider = { ApiKeyStore.resolve("openrouter") },
+                    extraHeaders = mapOf(
+                        "HTTP-Referer" to "https://github.com/drishti-poc",
+                        "X-Title" to "Aura",
+                    ),
+                ),
+            )
         }
-        // Unknown failures: still fall back so Drishti stays usable during OpenAI outages.
-        return true
+
+        if (ApiKeyStore.resolve("gemini").isNotBlank()) {
+            list.add(
+                OpenAiCompatibleClient(
+                    providerId = "gemini",
+                    baseUrl = "https://generativelanguage.googleapis.com/v1beta/openai",
+                    model = if (fast) fastModel else BuildConfig.GEMINI_MODEL,
+                    apiKeyProvider = { ApiKeyStore.resolve("gemini") },
+                ),
+            )
+        }
+
+        if (ApiKeyStore.resolve("anthropic").isNotBlank()) {
+            list.add(
+                if (fast) {
+                    AnthropicClient(model = "claude-haiku-4-5-20251001")
+                } else {
+                    AnthropicClient()
+                },
+            )
+        }
+
+        if (ApiKeyStore.resolve("openai").isNotBlank()) {
+            list.add(
+                OpenAiCompatibleClient(
+                    providerId = "openai",
+                    baseUrl = "https://api.openai.com/v1",
+                    model = if (fast) "gpt-4o-mini" else BuildConfig.OPENAI_MODEL,
+                    apiKeyProvider = { ApiKeyStore.resolve("openai") },
+                ),
+            )
+        }
+
+        return list
+    }
+
+    companion object {
+        private const val TAG = "LlmRouter"
     }
 }
