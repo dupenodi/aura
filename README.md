@@ -1,6 +1,6 @@
 # Drishti
 
-On-device Android screen assistant POC. Accessibility tree + gestures follow the same device-side automation logic as [mobilerun-portal](https://github.com/droidrun/mobilerun-portal) (ported in-process — **not** a droidrun dependency). An LLM tool-use loop plans and executes multi-step tasks.
+On-device Android screen assistant POC. Aura **shows** the user how to do things: it reads the accessibility tree (indexing ported in-process from [mobilerun-portal](https://github.com/droidrun/mobilerun-portal) — **not** a droidrun dependency), and an LLM loop picks the single next step, moves a cursor onto it, and waits for the user's own finger. It never taps, types or swipes for them.
 
 > **POC only.** API keys live on-device (`local.properties` → BuildConfig, optional EncryptedSharedPreferences). Move keys behind a backend proxy before any real distribution.
 
@@ -36,30 +36,6 @@ LLM_PROVIDER=local   # or leave as auto
 
 Emulator: use `http://10.0.2.2:11434/v1`. Same Wi‑Fi: use your machine’s LAN IP.
 
-## Run history / analysis
-
-Every agent task writes a folder under app-private storage:
-
-```
-files/runs/<runId>/
-  manifest.json      # task, status, step counts
-  events.jsonl       # observe / llm / tool / stuck timeline
-  summary.txt        # human-readable timeline
-  trees/observe_NNN.json
-  shots/observe_NNN.png
-```
-
-Open **Run history** from the home screen or long-press the bubble → **Run history / snapshots**.
-
-Pull the latest run to your machine:
-
-```bash
-adb shell run-as com.drishti ls files/runs
-adb exec-out run-as com.drishti tar -c files/runs | tar -x -C /tmp/drishti-runs
-```
-
-Use these snapshots to compare tree changes across commands before changing automation reliability.
-
 ## Build & install
 
 ```bash
@@ -76,20 +52,23 @@ Then open Drishti → **Show summon bubble**.
 
 ## Using the bubble
 
-- **Tap** → text field, **Speak task**, canned task: *Open WhatsApp and go to the first chat*
-- **Long-press** → settings + last-run action log
-- Before each tap, a highlight shows the target for ~500ms
+- **Tap** → type what you need help with
+- **Hold** → say it instead; release to send
+- **Drag** → park the orb at either edge
+
+Each step dims the screen, rings the one thing to press, glides the cursor onto it and says
+what to do. The next step only comes once you have done it.
 
 ## Architecture (short)
 
 | Layer | Role |
 |-------|------|
-| `ScreenAgentAccessibilityService` | Portal-style tree indexing, `inputText`, screenshots |
-| `GestureController` | Coordinate tap / swipe / global via `dispatchGesture` |
+| `ScreenAgentAccessibilityService` | Portal-style tree indexing, read-only (no gestures, no screenshots) |
 | `LlmRouter` | Multi-provider chat (local + cloud) |
-| `AgentOrchestrator` | Tool loop (cap 20 steps, stuck detection) |
-| `VisionFallback` | Sparse-tree → attach screenshot |
-| `SafetyGate` | Confirm for payment / delete / OTP / etc. |
+| `AgentOrchestrator` | One step per turn: observe → ask the model → show it (cap 20 steps) |
+| `ToolExecutor` | Turns a step into cursor + instruction, then waits for the user |
+| `PointerOverlay` | Spotlight, neon ring and cursor drawn in absolute screen coordinates |
+| `TreeJson.movedOn` | Decides whether the user actually did it, ignoring cosmetic redraws |
 
 ## Explicit non-goals
 

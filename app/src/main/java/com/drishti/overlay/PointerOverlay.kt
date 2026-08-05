@@ -22,7 +22,6 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.PathInterpolator
-import com.drishti.accessibility.ScreenAgentAccessibilityService
 
 /**
  * Non-interactive guidance overlay: spotlight highlight + neon cursor.
@@ -30,12 +29,10 @@ import com.drishti.accessibility.ScreenAgentAccessibilityService
  * Uses TYPE_ACCESSIBILITY_OVERLAY only when constructed with an AccessibilityService;
  * BubbleService must use TYPE_APPLICATION_OVERLAY (otherwise BadTokenException).
  */
-class PointerOverlay(private val context: Context) :
-    ScreenAgentAccessibilityService.OverlayDrawingController {
+class PointerOverlay(private val context: Context) {
 
     private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val handler = Handler(Looper.getMainLooper())
-    private var drawingEnabled = true
 
     private val pointerView = PointerView(context)
     private var pointerAdded = false
@@ -53,7 +50,6 @@ class PointerOverlay(private val context: Context) :
     @JvmOverloads
     fun showTargetAt(bounds: Rect, durationMs: Long = DEFAULT_HOLD_MS, label: String? = null) {
         handler.post {
-            if (!drawingEnabled) return@post
             if (!ensurePointer()) return@post
             val generation = ++showGeneration
             pointerView.visibility = View.VISIBLE
@@ -74,7 +70,6 @@ class PointerOverlay(private val context: Context) :
 
     fun showStatus(text: String, durationMs: Long = 2000L) {
         handler.post {
-            if (!drawingEnabled) return@post
             statusListener?.invoke(text, durationMs)
         }
     }
@@ -89,20 +84,6 @@ class PointerOverlay(private val context: Context) :
                 } catch (_: Exception) {
                 }
                 pointerAdded = false
-            }
-        }
-    }
-
-    override fun isDrawingEnabled(): Boolean = drawingEnabled
-
-    override fun setDrawingEnabled(enabled: Boolean) {
-        drawingEnabled = enabled
-        handler.post {
-            if (!enabled) {
-                showGeneration++
-                // Screenshots for the vision fallback must not contain our own chrome,
-                // so drop it instantly rather than fading.
-                pointerView.hideImmediate()
             }
         }
     }
@@ -123,7 +104,6 @@ class PointerOverlay(private val context: Context) :
         return try {
             wm.addView(pointerView, params)
             pointerAdded = true
-            ScreenAgentAccessibilityService.getInstance()?.overlayDrawingController = this
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add pointer overlay", e)
@@ -312,17 +292,6 @@ class PointerOverlay(private val context: Context) :
                 labelText = null
                 stopPulse()
             }
-        }
-
-        /** Immediate teardown with no animation (used before screenshots). */
-        fun hideImmediate() {
-            stopAnimations()
-            revealFraction = 0f
-            showHighlight = false
-            cursorVisible = false
-            labelText = null
-            visibility = GONE
-            invalidate()
         }
 
         fun stopAnimations() {

@@ -14,18 +14,17 @@ enum class TaskOutcome { Completed, Stopped, Cancelled }
 data class TaskRecord(
     val id: String,
     val task: String,
-    val mode: AuraMode,
     val steps: Int,
     val outcome: TaskOutcome,
     /** Why it stopped, when it didn't finish — shown instead of the step count. */
     val detail: String? = null,
     val timestamp: Long = System.currentTimeMillis(),
 ) {
-    /** "Guide · 4 steps · 12 min ago" — the meta line under the task title. */
+    /** "4 steps · 12 min ago" — the meta line under the task title. */
     fun metaLine(now: Long = System.currentTimeMillis()): String {
         val when0 = relativeTime(now - timestamp)
         return when (outcome) {
-            TaskOutcome.Completed -> "${mode.shortLabel} · $steps steps · $when0"
+            TaskOutcome.Completed -> "$steps steps · $when0"
             TaskOutcome.Stopped -> "${detail ?: "Stopped"} · $when0"
             TaskOutcome.Cancelled -> "Cancelled · $when0"
         }
@@ -84,8 +83,6 @@ class TaskHistory private constructor(context: Context) {
                     TaskRecord(
                         id = o.optString("id"),
                         task = o.optString("task"),
-                        mode = runCatching { AuraMode.valueOf(o.optString("mode")) }
-                            .getOrDefault(AuraMode.Guide),
                         steps = o.optInt("steps"),
                         outcome = runCatching { TaskOutcome.valueOf(o.optString("outcome")) }
                             .getOrDefault(TaskOutcome.Completed),
@@ -105,7 +102,6 @@ class TaskHistory private constructor(context: Context) {
                     JSONObject().apply {
                         put("id", r.id)
                         put("task", r.task)
-                        put("mode", r.mode.name)
                         put("steps", r.steps)
                         put("outcome", r.outcome.name)
                         put("detail", r.detail ?: "")

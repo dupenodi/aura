@@ -42,10 +42,6 @@ val localLlmApiKey: String = localProperties.getProperty("LOCAL_LLM_API_KEY") ?:
 val llmProvider: String =
     localProperties.getProperty("LLM_PROVIDER") ?: "auto"
 
-// Cheap, fast model used to rewrite the user's request before the agent loop runs.
-val fastModel: String =
-    localProperties.getProperty("LLM_FAST_MODEL") ?: "gemini-3.5-flash"
-
 val llmMaxTokens: Int =
     localProperties.getProperty("LLM_MAX_TOKENS")?.toIntOrNull() ?: 1024
 val agentMaxSteps: Int =
@@ -76,7 +72,6 @@ android {
         buildConfigField("String", "LOCAL_LLM_MODEL", "\"${escapeBuildConfig(localLlmModel)}\"")
         buildConfigField("String", "LOCAL_LLM_API_KEY", "\"${escapeBuildConfig(localLlmApiKey)}\"")
         buildConfigField("String", "LLM_PROVIDER", "\"${escapeBuildConfig(llmProvider)}\"")
-        buildConfigField("String", "LLM_FAST_MODEL", "\"${escapeBuildConfig(fastModel)}\"")
         buildConfigField("int", "LLM_MAX_TOKENS", "$llmMaxTokens")
         buildConfigField("int", "AGENT_MAX_STEPS", "$agentMaxSteps")
     }

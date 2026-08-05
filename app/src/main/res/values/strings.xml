@@ -2,7 +2,7 @@
 <resources>
     <string name="app_name">Aura</string>
     <string name="accessibility_service_label">Aura</string>
-    <string name="accessibility_service_description">Aura reads what is on screen so it can point at the right button, and can tap for you when you ask it to. Screen content stays on this device and is used only for the task you asked for. Password fields and banking apps are skipped.</string>
+    <string name="accessibility_service_description">Aura reads what is on screen so it can point at the right button and show you what to do next. It never taps for you. Screen content is used only for the step you asked for. Password fields and banking apps are skipped.</string>
     <string name="overlay_channel_name">Aura</string>
     <string name="overlay_channel_description">Keeps the floating orb ready</string>
     <string name="overlay_notification_title">Aura is ready</string>

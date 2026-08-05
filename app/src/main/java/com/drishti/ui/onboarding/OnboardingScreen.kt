@@ -44,7 +44,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.drishti.data.AuraMode
 import com.drishti.ui.theme.Aura
 import com.drishti.ui.theme.AuraCard
 import com.drishti.ui.theme.AuraEyebrow
@@ -71,17 +70,15 @@ fun OnboardingFlow(
     permissions: PermissionState,
     orbSkin: OrbSkin,
     glow: GlowLevel,
-    mode: AuraMode,
     onOrbSkin: (OrbSkin) -> Unit,
     onGlow: (GlowLevel) -> Unit,
-    onMode: (AuraMode) -> Unit,
     onRequestAccessibility: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestMic: () -> Unit,
     onFinish: (firstTask: String?) -> Unit,
 ) {
     var step by remember { mutableIntStateOf(0) }
-    val lastStep = 4
+    val lastStep = 3
 
     Box(
         Modifier
@@ -102,13 +99,12 @@ fun OnboardingFlow(
             when (current) {
                 0 -> WelcomeStep(orbSkin, glow) { step = 1 }
                 1 -> PresenceStep(orbSkin, glow, onOrbSkin, onGlow) { step = 2 }
-                2 -> ModeStep(mode, onMode) { step = 3 }
-                3 -> PermissionsStep(
+                2 -> PermissionsStep(
                     permissions = permissions,
                     onRequestAccessibility = onRequestAccessibility,
                     onRequestOverlay = onRequestOverlay,
                     onRequestMic = onRequestMic,
-                    onContinue = { step = 4 },
+                    onContinue = { step = 3 },
                 )
                 else -> FirstTaskStep(orbSkin, glow, onFinish)
             }
@@ -217,7 +213,7 @@ private fun PresenceStep(
     onContinue: () -> Unit,
 ) {
     StepScaffold(
-        eyebrow = "Step 1 of 4",
+        eyebrow = "Step 1 of 3",
         title = "Pick a presence",
         subtitle = "How the orb looks and how loudly it glows.",
         footer = { AuraPrimaryButton("Continue", onContinue) },
@@ -307,104 +303,6 @@ private fun PresenceStep(
 }
 
 @Composable
-private fun ModeStep(mode: AuraMode, onMode: (AuraMode) -> Unit, onContinue: () -> Unit) {
-    StepScaffold(
-        eyebrow = "Step 2 of 4",
-        title = "How it should behave",
-        subtitle = "You can change this any time in Settings, or per app.",
-        footer = { AuraPrimaryButton("Continue", onContinue) },
-    ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            ModeOption(
-                title = "Guide me",
-                body = "The cursor points at the next thing to tap and waits. " +
-                    "Your finger does everything.",
-                selected = mode == AuraMode.Guide,
-                accent = Aura.Cyan,
-                onClick = { onMode(AuraMode.Guide) },
-            )
-            ModeOption(
-                title = "Do it for me",
-                body = "The cursor taps for you, slowly enough to follow. " +
-                    "Payments and deletions always ask first.",
-                selected = mode == AuraMode.Auto,
-                accent = Aura.Purple,
-                onClick = { onMode(AuraMode.Auto) },
-            )
-            Spacer(Modifier.height(4.dp))
-            AuraNote("Most people start on Guide, then switch. You can change it whenever.")
-        }
-    }
-}
-
-@Composable
-fun ModeOption(
-    title: String,
-    body: String,
-    selected: Boolean,
-    accent: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val shape = RoundedCornerShape(18.dp)
-    Column(
-        modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(
-                if (selected) {
-                    Brush.linearGradient(
-                        listOf(accent.copy(alpha = 0.14f), Aura.Purple.copy(alpha = 0.06f)),
-                    )
-                } else {
-                    Brush.linearGradient(listOf(Aura.Surface, Aura.Surface))
-                },
-            )
-            .border(1.5.dp, if (selected) accent else Aura.LineBright, shape)
-            .clickable(onClick = onClick)
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Box(
-                Modifier
-                    .size(22.dp)
-                    .clip(RoundedCornerShape(11.dp))
-                    .border(
-                        2.dp,
-                        if (selected) accent else Color(0xFF3A3A4C),
-                        RoundedCornerShape(11.dp),
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (selected) {
-                    Box(
-                        Modifier
-                            .size(10.dp)
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(accent),
-                    )
-                }
-            }
-            Text(
-                title,
-                style = MaterialTheme.typography.titleMedium,
-                color = if (selected) Aura.TextHi else Aura.TextMid,
-            )
-        }
-        Text(body, style = MaterialTheme.typography.bodySmall, color = Aura.TextDim)
-    }
-}
-
-@Composable
 private fun PermissionsStep(
     permissions: PermissionState,
     onRequestAccessibility: () -> Unit,
@@ -417,7 +315,7 @@ private fun PermissionsStep(
     val essentialsGranted = permissions.accessibility && permissions.overlay
 
     StepScaffold(
-        eyebrow = "Step 3 of 4",
+        eyebrow = "Step 2 of 3",
         title = "What I need",
         subtitle = "Each one is asked in context. The next screen is Android's, not mine.",
         footer = {
@@ -537,7 +435,7 @@ private fun FirstTaskStep(
     )
 
     StepScaffold(
-        eyebrow = "Step 4 of 4",
+        eyebrow = "Step 3 of 3",
         title = "Try one out loud",
         subtitle = "Hold the orb and say it, or tap a suggestion.",
         footer = {

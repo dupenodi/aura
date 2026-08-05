@@ -58,17 +58,13 @@ class BubbleService : Service() {
     private lateinit var wm: WindowManager
     private lateinit var prefs: AuraPrefs
     private lateinit var pointerOverlay: PointerOverlay
-    private lateinit var confirmOverlay: ConfirmPromptOverlay
     private lateinit var orchestrator: AgentOrchestrator
 
     private var orbView: OrbView? = null
     private var orbParams: WindowManager.LayoutParams? = null
     private var composerView: View? = null
 
-    private var bannerView: StatusBannerView? = null
-    private var bannerParams: WindowManager.LayoutParams? = null
     private var voice: VoiceSession? = null
-    private var bannerHolder: View? = null
     private var bubbleView: BubbleCardView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var bubbleHide: Runnable? = null
@@ -76,6 +72,9 @@ class BubbleService : Service() {
 
     private var orbX = 0
     private var orbY = 0
+
+    /** True while a guidance session is on, which turns the orb into a Stop control. */
+    private var running = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val speech by lazy { com.drishti.voice.SpeechOutput(this) }
@@ -93,21 +92,16 @@ class BubbleService : Service() {
         prefs = AuraPrefs.get(this)
         pointerOverlay = PointerOverlay(this)
         pointerOverlay.statusListener = { text, duration -> say(text, duration) }
-        confirmOverlay = ConfirmPromptOverlay(this)
         orchestrator = AgentOrchestrator(
             appContext = applicationContext,
             pointerOverlay = pointerOverlay,
-            confirmOverlay = confirmOverlay,
             scope = agentScope,
         )
-        orchestrator.onRunStateChanged = { running ->
+        orchestrator.onRunStateChanged = { isRunning ->
             mainHandler.post {
-                orbView?.busy = running
-                if (running) showBanner() else hideBanner()
+                running = isRunning
+                orbView?.busy = isRunning
             }
-        }
-        orchestrator.onProgress = { step, message ->
-            mainHandler.post { bannerView?.bind(prefs.mode.value.shortLabel, step, message) }
         }
 
         startAsForeground()
@@ -131,8 +125,7 @@ class BubbleService : Service() {
             }
             ACTION_COMPOSE -> mainHandler.post { showComposer() }
             ACTION_RUN_TASK -> intent.getStringExtra(EXTRA_TASK)?.let { task ->
-                val routineId = intent.getStringExtra(EXTRA_ROUTINE_ID)
-                mainHandler.post { startTask(task, routineId) }
+                mainHandler.post { startTask(task) }
             }
             ACTION_SHOW -> if (orbView == null && Settings.canDrawOverlays(this)) showOrb()
         }
@@ -141,14 +134,12 @@ class BubbleService : Service() {
 
     override fun onDestroy() {
         hideComposer()
-        hideBanner()
         voice?.cancel()
         speech.shutdown()
         removeBubble()
         orbView?.let { runCatching { wm.removeView(it) } }
         orbView = null
         pointerOverlay.detach()
-        confirmOverlay.detach()
         runCatching { unregisterReceiver(batteryReceiver) }
         uiScope.cancel()
         agentScope.cancel()
@@ -290,6 +281,10 @@ class BubbleService : Service() {
                     when {
                         holding -> finishListening()
                         moved -> snapToEdge(view, params, size)
+                        // Mid-session the orb is the way out. Nothing else may cover the
+                        // app the user is being guided through, and the orb is the one
+                        // control they have already been watching.
+                        running -> stopRun()
                         else -> showComposer()
                     }
                     true
@@ -588,10 +583,17 @@ class BubbleService : Service() {
         composerView = null
     }
 
-    private fun startTask(task: String, routineId: String? = null) {
+    private fun startTask(task: String) {
         hideComposer()
-        say("On it", 1500)
-        orchestrator.runTask(task, routineId)
+        say("Working on it — tap me to stop", 2500)
+        orchestrator.runTask(task)
+    }
+
+    private fun stopRun() {
+        orchestrator.cancel()
+        running = false
+        orbView?.busy = false
+        say("Stopped.", 2500)
     }
 
     // ---- Speech bubble ----------------------------------------------------------
@@ -729,52 +731,6 @@ class BubbleService : Service() {
         bubbleParams = null
     }
 
-    // ---- Run banner -------------------------------------------------------------
-
-    private fun showBanner() {
-        if (bannerView != null) return
-        val banner = StatusBannerView(this).apply {
-            bind(prefs.mode.value.shortLabel, 0, "Working out what to do")
-            setIndeterminate(true)
-            onStop = {
-                orchestrator.cancel()
-                hideBanner()
-                say("Stopped. Nothing else was changed.", 3000)
-            }
-        }
-        val params = overlayParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            gravity = Gravity.TOP
-            y = dp(48)
-            // Touchable so Stop works, but it must never swallow taps meant for the app.
-            flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        }
-        val holder = LinearLayout(this).apply {
-            setPadding(dp(12), 0, dp(12), 0)
-            addView(
-                banner,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-        }
-        if (runCatching { wm.addView(holder, params) }.isFailure) return
-        bannerView = banner
-        bannerParams = params
-        bannerHolder = holder
-    }
-
-    private fun hideBanner() {
-        bannerHolder?.let { runCatching { wm.removeView(it) } }
-        bannerHolder = null
-        bannerView = null
-        bannerParams = null
-    }
-
     // ---- Plumbing ---------------------------------------------------------------
 
     private fun overlayParams(width: Int, height: Int): WindowManager.LayoutParams {
@@ -804,9 +760,7 @@ class BubbleService : Service() {
         const val ACTION_COMPOSE = "com.drishti.overlay.COMPOSE"
         const val ACTION_RUN_TASK = "com.drishti.overlay.RUN_TASK"
         private const val EXTRA_TASK = "task"
-        private const val EXTRA_ROUTINE_ID = "routine_id"
         private const val NOTIF_ID = 42
-        private const val LONG_PRESS_MS = 320L
 
         fun start(context: Context) = send(context, Intent(context, BubbleService::class.java).setAction(ACTION_SHOW))
 
@@ -818,14 +772,6 @@ class BubbleService : Service() {
 
         fun openComposer(context: Context) =
             send(context, Intent(context, BubbleService::class.java).setAction(ACTION_COMPOSE))
-
-        fun runRoutine(context: Context, task: String, routineId: String) = send(
-            context,
-            Intent(context, BubbleService::class.java)
-                .setAction(ACTION_RUN_TASK)
-                .putExtra(EXTRA_TASK, task)
-                .putExtra(EXTRA_ROUTINE_ID, routineId),
-        )
 
         fun runTask(context: Context, task: String) = send(
             context,

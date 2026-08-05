@@ -16,24 +16,7 @@ class LlmRouter(
 ) : ChatBackend {
     override val providerId: String = "router"
 
-    private val backends: List<ChatBackend> by lazy { buildBackends(fast = false) }
-
-    /**
-     * The same provider chain but pointed at a small, cheap model — used for quick
-     * side-tasks like rewriting the user's request, where the big model would be
-     * slower and more expensive for no benefit.
-     */
-    private val fastBackends: List<ChatBackend> by lazy { buildBackends(fast = true) }
-
-    fun fastBackend(): ChatBackend? {
-        val want = preferred.trim().lowercase()
-        val chain = if (want == "auto" || want.isEmpty()) {
-            fastBackends
-        } else {
-            fastBackends.filter { it.providerId == want }.ifEmpty { fastBackends }
-        }
-        return chain.firstOrNull()
-    }
+    private val backends: List<ChatBackend> by lazy { buildBackends() }
 
     override fun createMessage(
         system: String,
@@ -74,9 +57,8 @@ class LlmRouter(
         }
     }
 
-    private fun buildBackends(fast: Boolean): List<ChatBackend> {
+    private fun buildBackends(): List<ChatBackend> {
         val list = mutableListOf<ChatBackend>()
-        val fastModel = BuildConfig.LLM_FAST_MODEL
 
         val localBase = BuildConfig.LOCAL_LLM_BASE_URL.trim()
         if (localBase.isNotEmpty()) {
@@ -84,7 +66,6 @@ class LlmRouter(
                 OpenAiCompatibleClient(
                     providerId = "local",
                     baseUrl = localBase,
-                    // A local model is already cheap; no separate fast variant needed.
                     model = BuildConfig.LOCAL_LLM_MODEL.ifBlank { "llama3.2" },
                     apiKeyProvider = { ApiKeyStore.resolve("local").ifBlank { "ollama" } },
                     allowEmptyKey = true,
@@ -97,7 +78,7 @@ class LlmRouter(
                 OpenAiCompatibleClient(
                     providerId = "openrouter",
                     baseUrl = "https://openrouter.ai/api/v1",
-                    model = if (fast) "google/$fastModel" else BuildConfig.OPENROUTER_MODEL,
+                    model = BuildConfig.OPENROUTER_MODEL,
                     apiKeyProvider = { ApiKeyStore.resolve("openrouter") },
                     extraHeaders = mapOf(
                         "HTTP-Referer" to "https://github.com/drishti-poc",
@@ -112,20 +93,14 @@ class LlmRouter(
                 OpenAiCompatibleClient(
                     providerId = "gemini",
                     baseUrl = "https://generativelanguage.googleapis.com/v1beta/openai",
-                    model = if (fast) fastModel else BuildConfig.GEMINI_MODEL,
+                    model = BuildConfig.GEMINI_MODEL,
                     apiKeyProvider = { ApiKeyStore.resolve("gemini") },
                 ),
             )
         }
 
         if (ApiKeyStore.resolve("anthropic").isNotBlank()) {
-            list.add(
-                if (fast) {
-                    AnthropicClient(model = "claude-haiku-4-5-20251001")
-                } else {
-                    AnthropicClient()
-                },
-            )
+            list.add(AnthropicClient())
         }
 
         if (ApiKeyStore.resolve("openai").isNotBlank()) {
@@ -133,7 +108,7 @@ class LlmRouter(
                 OpenAiCompatibleClient(
                     providerId = "openai",
                     baseUrl = "https://api.openai.com/v1",
-                    model = if (fast) "gpt-4o-mini" else BuildConfig.OPENAI_MODEL,
+                    model = BuildConfig.OPENAI_MODEL,
                     apiKeyProvider = { ApiKeyStore.resolve("openai") },
                 ),
             )

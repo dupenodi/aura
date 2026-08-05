@@ -1,321 +1,209 @@
 package com.drishti.agent
 
-import android.accessibilityservice.AccessibilityService
 import android.content.Context
-import android.content.Intent
 import android.graphics.Rect
 import android.os.SystemClock
-import com.drishti.accessibility.GestureController
+import com.drishti.accessibility.ElementNode
 import com.drishti.accessibility.ScreenAgentAccessibilityService
 import com.drishti.accessibility.TreeJson
-import com.drishti.data.AutoSpeed
-import com.drishti.data.AuraMode
-import com.drishti.overlay.ConfirmPromptOverlay
 import com.drishti.overlay.PointerOverlay
 import com.drishti.voice.SpeechOutput
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
+/**
+ * Turns the model's chosen step into guidance: the cursor moves to one place on screen,
+ * Aura says what to do there, and then it waits for the user's own finger.
+ *
+ * Nothing in here touches the phone. The only way a step "succeeds" is that the user did
+ * it themselves and the screen moved on.
+ */
 class ToolExecutor(
     private val appContext: Context,
     private val pointerOverlay: PointerOverlay,
-    private val confirmOverlay: ConfirmPromptOverlay,
     private val speechOutput: SpeechOutput,
-    private val askUserHandler: suspend (String) -> String,
-    private val modeFor: (packageName: String) -> AuraMode = { AuraMode.Auto },
-    private val autoSpeed: () -> AutoSpeed = { AutoSpeed.FollowAlong },
 ) {
     data class Result(
+        /** True when the user followed the instruction and the screen moved on. */
         val ok: Boolean,
         val message: String,
+        /** True when the session is over, whether they got there or gave up. */
         val done: Boolean = false,
-        val fingerprintAfter: String = "",
     )
 
     suspend fun execute(name: String, input: JsonObject): Result {
-        val argsText = input.toString()
         val service = ScreenAgentAccessibilityService.getInstance()
-            ?: return Result(false, "Accessibility service not running")
+            ?: return Result(false, "I can't see the screen at the moment")
 
-        val targetHint = when (name) {
-            "tap" -> {
-                val idx = input.int("index") ?: return Result(false, "missing index")
-                service.findElementByIndex(idx)?.text.orEmpty()
-            }
-            "type" -> input.string("text").orEmpty()
-            "open_app" -> input.string("package_name").orEmpty()
-            else -> ""
-        }
-
-        // Guide mode is a promise, not a preference: nothing that changes the phone may
-        // run. Enforced here, in one place, so no tool can quietly bypass it.
-        if (name in ACTING_TOOLS && modeFor(service.currentPackage()) == AuraMode.Guide) {
-            return guide(service, name, input)
-        }
-
-        if (SafetyGate.isSensitive(name, argsText, targetHint)) {
-            speechOutput.speak("This looks sensitive. Please confirm.")
-            pointerOverlay.showStatus("Confirm sensitive action")
-            val ok = confirmOverlay.confirm("Allow: $name?\n$argsText")
-            if (!ok) {
-                ActionLog.append("DENIED $name $argsText")
-                return Result(false, "User denied sensitive action")
-            }
-        }
+        // Let whatever the last step started (a list settling, a screen sliding in) finish
+        // before resolving anything, so the cursor lands where things actually are and not
+        // where they were mid-transition.
+        if (name in GUIDING_TOOLS) delay(SETTLE_MS)
 
         val result = when (name) {
-            "tap" -> tapIndex(service, input.int("index"))
-            "tap_xy" -> tapXy(input.int("x"), input.int("y"))
+            "point_at" -> {
+                val index = input.int("index") ?: return Result(false, "missing index")
+                val target = service.resolveTapTarget(index)
+                    ?: return Result(
+                        false,
+                        "index $index is not on the screen any more — look at the tree again " +
+                            "and point at something that is",
+                    )
+                val label = input.string("label")?.takeIf { it.isNotBlank() }
+                    ?: target.element?.text?.takeIf { it.isNotBlank() }
+                guide(service, label?.let { "Tap $it" } ?: "Tap here", Rect(target.bounds))
+            }
+
             "type" -> {
                 val text = input.string("text") ?: return Result(false, "missing text")
-                val clear = input.bool("clear") ?: true
-                val index = input.int("index")
-                val ok = service.inputText(text, clear, index)
-                Result(
-                    ok,
-                    when {
-                        ok -> "typed"
-                        index != null -> "type failed (index=$index); tap the field first or pick a different index"
-                        else -> "type failed; tap an editable field first, or pass index"
-                    },
-                )
+                val bounds = input.int("index")?.let { service.resolveTapTarget(it)?.bounds }
+                guide(service, "Type: $text", bounds?.let { Rect(it) })
             }
-            "swipe" -> {
-                val sx = input.int("startX") ?: return Result(false, "missing startX")
-                val sy = input.int("startY") ?: return Result(false, "missing startY")
-                val ex = input.int("endX") ?: return Result(false, "missing endX")
-                val ey = input.int("endY") ?: return Result(false, "missing endY")
-                val dur = input.int("durationMs") ?: 300
-                val ok = GestureController.swipe(sx, sy, ex, ey, dur)
-                Result(ok, if (ok) "swiped" else "swipe failed")
-            }
+
             "scroll" -> {
-                val direction = input.string("direction") ?: "down"
-                val before = TreeJson.fingerprint(service.getVisibleElements())
-                val ok = service.scroll(direction)
-                delay(SETTLE_MS)
-                val after = TreeJson.fingerprint(service.captureAgentTree())
-                val changed = before != after
-                Result(
-                    ok,
-                    when {
-                        !ok -> "scroll failed"
-                        changed -> "scrolled $direction"
-                        else -> "scrolled $direction (no tree change — likely end of list)"
-                    },
-                )
+                val up = input.string("direction")?.startsWith("up", ignoreCase = true) == true
+                val instruction = if (up) {
+                    "Slide your finger down the screen to go back up"
+                } else {
+                    "Slide your finger up the screen to see more"
+                }
+                guide(service, instruction, null)
             }
-            "open_app" -> openApp(service, input.string("package_name"))
-            "wait_for_change" -> {
-                val ms = input.int("ms") ?: 800
-                delay(ms.toLong())
-                service.captureAgentTree()
-                Result(true, "waited ${ms}ms")
+
+            "open_app" -> {
+                val requested = input.string("package_name")
+                    ?: return Result(false, "missing package_name")
+                val resolved = DeviceContext.resolve(appContext, requested)
+                    ?: return Result(
+                        false,
+                        "no app called \"$requested\" is installed — pick one from the list " +
+                            "you were given, and never tell the user to install anything",
+                    )
+                val label = appLabelFor(resolved) ?: requested
+                // Point at the icon when it is on screen. Guiding with words alone
+                // ("open Settings") is the help they already couldn't follow — the whole
+                // value here is showing them where to press.
+                val icon = findOnScreenByText(service, label)
+                guide(service, if (icon != null) "Tap $label" else "Open $label", icon)
             }
+
+            "back" -> guide(service, "Press the back button", null)
+            "home" -> guide(service, "Go to the home screen", null)
+
             "speak" -> {
                 val text = input.string("text").orEmpty()
                 speechOutput.speak(text)
-                pointerOverlay.showStatus(text)
-                Result(true, "spoke")
+                pointerOverlay.showStatus(text, SPEAK_HOLD_MS)
+                Result(true, "said it")
             }
-            "ask_user" -> {
-                val q = input.string("question") ?: return Result(false, "missing question")
-                speechOutput.speak(q)
-                pointerOverlay.showStatus(q)
-                val answer = confirmOverlay.ask(q).ifBlank { askUserHandler(q) }
-                Result(true, "user said: $answer")
-            }
+
             "done" -> {
-                val summary = input.string("summary").orEmpty()
-                speechOutput.speak("Done")
-                pointerOverlay.showStatus(summary.ifBlank { "Done" })
+                val summary = input.string("summary").orEmpty().ifBlank { "All done" }
+                speechOutput.speak(summary)
+                pointerOverlay.hide()
+                pointerOverlay.showStatus(summary, SPEAK_HOLD_MS)
                 Result(true, summary, done = true)
             }
-            "back" -> {
-                val ok = GestureController.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                Result(ok, if (ok) "back" else "back failed")
-            }
-            "home" -> {
-                val ok = GestureController.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-                Result(ok, if (ok) "home" else "home failed")
-            }
-            "recents" -> {
-                val ok = GestureController.performGlobalAction(
-                    AccessibilityService.GLOBAL_ACTION_RECENTS,
-                )
-                Result(ok, if (ok) "recents" else "recents failed")
-            }
+
             else -> Result(false, "unknown tool: $name")
         }
 
         ActionLog.append("$name -> ${result.message}")
-        delay(SETTLE_MS)
-        val fp = TreeJson.fingerprint(service.captureAgentTree())
-        return result.copy(fingerprintAfter = fp)
-    }
-
-    private suspend fun tapIndex(
-        service: ScreenAgentAccessibilityService,
-        index: Int?,
-    ): Result {
-        if (index == null) return Result(false, "missing index")
-        val target = service.resolveTapTarget(index)
-            ?: return Result(false, "index $index not found in last observe tree")
-        val bounds = Rect(target.bounds)
-        val name = target.element?.text?.takeIf { it.isNotBlank() }
-        pointerOverlay.showTargetAt(bounds, POINTER_HOLD_MS + 400L, name?.let { "Tap \"$it\"" } ?: "Tap")
-        delay(autoSpeed().stepPauseMs)
-
-        // Prefer semantic click when we still have a live node; else gesture at published bounds.
-        if (target.element != null && service.clickElement(target.element)) {
-            return Result(true, "clicked index=$index via ACTION_CLICK")
-        }
-        val x = bounds.centerX()
-        val y = bounds.centerY()
-        val ok = GestureController.tap(x, y)
-        return Result(
-            ok,
-            if (ok) {
-                val via = if (target.element != null) "live" else "published-bounds"
-                "tapped index=$index at ($x,$y) [$via]"
-            } else {
-                "tap failed"
-            },
-        )
+        return result
     }
 
     /**
-     * Guide mode: turn whatever the model wanted to do into an instruction for the user,
-     * highlight the target where there is one, and wait for them to do it.
+     * Shows one step and waits for the user to do it.
      *
-     * Nothing here touches the phone. If the user doesn't act within [GUIDE_WAIT_MS] we
-     * report that honestly instead of quietly doing it ourselves.
+     * The highlight stays up for the whole wait — an instruction that vanishes after a
+     * second is worse than none for someone who reads slowly — and the instruction is
+     * repeated once, aloud, before we give up.
+     *
+     * Giving up ends the session then and there. Asking the model what to say next would
+     * only tempt it into showing the step again, and someone who has sat through half a
+     * minute of a pulsing ring has already decided not to press it.
      */
     private suspend fun guide(
         service: ScreenAgentAccessibilityService,
-        tool: String,
-        input: JsonObject,
+        instruction: String,
+        bounds: Rect?,
     ): Result {
-        var bounds: Rect? = null
-        val instruction: String = when (tool) {
-            "tap" -> {
-                val index = input.int("index")
-                    ?: return Result(false, "missing index")
-                val target = service.resolveTapTarget(index)
-                    ?: return Result(false, "index $index not found in last observe tree")
-                bounds = Rect(target.bounds)
-                target.element?.text?.takeIf { it.isNotBlank() }
-                    ?.let { "Tap \"$it\"" } ?: "Tap the highlighted button"
-            }
+        val before = TreeJson.signature(service.captureAgentTree())
+        val beforePackage = service.currentPackage()
 
-            "tap_xy" -> {
-                val x = input.int("x") ?: return Result(false, "missing x")
-                val y = input.int("y") ?: return Result(false, "missing y")
-                bounds = Rect(x - 40, y - 40, x + 40, y + 40)
-                "Tap here"
-            }
-
-            "type" -> {
-                val text = input.string("text") ?: return Result(false, "missing text")
-                input.int("index")?.let { idx ->
-                    service.resolveTapTarget(idx)?.let { bounds = Rect(it.bounds) }
-                }
-                "Type: $text"
-            }
-
-            "scroll" -> "Scroll ${input.string("direction") ?: "down"}"
-            "swipe" -> "Swipe on the screen"
-            "open_app" -> {
-                val requested = input.string("package_name").orEmpty()
-                val label = appLabelFor(requested) ?: requested
-                "Open $label"
-            }
-
-            "back" -> "Go back"
-            "home" -> "Go to the home screen"
-            "recents" -> "Open recent apps"
-            else -> "Do the next step"
-        }
-
-        bounds?.let { pointerOverlay.showTargetAt(it, GUIDE_WAIT_MS, instruction) }
-        pointerOverlay.showStatus(instruction, GUIDE_WAIT_MS)
+        bounds?.takeIf { !it.isEmpty }?.let { pointerOverlay.showTargetAt(it, WAIT_MS, instruction) }
+        pointerOverlay.showStatus(instruction, WAIT_MS)
         speechOutput.speak(instruction)
 
-        val before = TreeJson.fingerprint(service.captureAgentTree())
-        val beforePackage = service.currentPackage()
-        val deadline = SystemClock.elapsedRealtime() + GUIDE_WAIT_MS
+        val deadline = SystemClock.elapsedRealtime() + WAIT_MS
+        var nudged = false
+        var changedPolls = 0
         while (SystemClock.elapsedRealtime() < deadline) {
-            delay(GUIDE_POLL_MS)
-            val now = TreeJson.fingerprint(service.captureAgentTree())
-            if (now != before || service.currentPackage() != beforePackage) {
+            delay(POLL_MS)
+            val now = TreeJson.signature(service.getVisibleElements())
+            // A different app counts on its own only if the screen changed with it.
+            // Unqualified, it fires on anything that merely raises a window — the keyboard,
+            // the status bar — none of which means the step was taken.
+            val switchedApp = service.currentPackage() != beforePackage &&
+                now.isNotEmpty() &&
+                now != before
+            // Confirmed over two polls, so the half-drawn frame in the middle of a
+            // transition cannot pass for a finished step.
+            changedPolls = if (TreeJson.movedOn(before, now) || switchedApp) changedPolls + 1 else 0
+            if (changedPolls >= CONFIRM_POLLS) {
                 pointerOverlay.hide()
-                return Result(true, "user did it (\"$instruction\"); the screen moved on")
+                return Result(true, "the user did it — \"$instruction\" — and the screen moved on")
+            }
+            if (!nudged && SystemClock.elapsedRealtime() > deadline - NUDGE_BEFORE_END_MS) {
+                nudged = true
+                speechOutput.speak(instruction)
             }
         }
+
         pointerOverlay.hide()
-        return Result(
-            false,
-            "Guide mode: told the user \"$instruction\" but nothing has changed yet. " +
-                "You cannot do it for them. Do not repeat the same step — call done() " +
-                "and leave them where they are.",
-        )
+        val parting = "I'll leave you here — tap me when you'd like to carry on."
+        speechOutput.speak(parting)
+        pointerOverlay.showStatus(parting, SPEAK_HOLD_MS)
+        return Result(false, "the user did not do it: \"$instruction\"", done = true)
     }
 
-    /** Human-readable app name for a package the model named, for instructions. */
-    private fun appLabelFor(requested: String): String? = runCatching {
-        val pm = appContext.packageManager
-        val resolved = DeviceContext.resolve(appContext, requested) ?: return null
-        pm.getApplicationLabel(pm.getApplicationInfo(resolved, 0)).toString()
-    }.getOrNull()
-
-    private suspend fun tapXy(x: Int?, y: Int?): Result {
-        if (x == null || y == null) return Result(false, "missing x/y")
-        val bounds = Rect(x - 40, y - 40, x + 40, y + 40)
-        pointerOverlay.showTargetAt(bounds, POINTER_HOLD_MS + 400L, "Tap")
-        delay(POINTER_HOLD_MS)
-        val ok = GestureController.tap(x, y)
-        return Result(ok, if (ok) "tapped ($x,$y)" else "tap failed")
-    }
-
-    private suspend fun openApp(
+    /**
+     * Finds something on the current screen labelled [label], so the cursor has somewhere
+     * to point. Matches the whole label first, then a prefix, which is how launcher icons
+     * appear when their names are truncated ("Settings", "Sett…").
+     */
+    private fun findOnScreenByText(
         service: ScreenAgentAccessibilityService,
-        packageName: String?,
-    ): Result {
-        if (packageName.isNullOrBlank()) return Result(false, "missing package_name")
-        return try {
-            val resolved = DeviceContext.resolve(appContext, packageName)
-                ?: return Result(
-                    false,
-                    "no installed app matches \"$packageName\" — pick a different app, " +
-                        "do not ask the user to install anything",
-                )
-            val launch = appContext.packageManager.getLaunchIntentForPackage(resolved)
-                ?: return Result(false, "no launch intent for $resolved")
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            appContext.startActivity(launch)
+        label: String,
+    ): Rect? {
+        val needle = label.trim().lowercase()
+        if (needle.isEmpty()) return null
 
-            val deadline = SystemClock.elapsedRealtime() + OPEN_APP_WAIT_MS
-            while (SystemClock.elapsedRealtime() < deadline) {
-                delay(OPEN_APP_POLL_MS)
-                if (service.currentPackage() == resolved) {
-                    service.captureAgentTree()
-                    return Result(true, "opened $resolved")
+        val matches = mutableListOf<Rect>()
+        fun walk(node: ElementNode) {
+            val text = node.text.trim().lowercase()
+            if (text.isNotEmpty() && !node.rect.isEmpty) {
+                if (text == needle || text.startsWith(needle) || needle.startsWith(text)) {
+                    matches.add(Rect(node.rect))
                 }
             }
-            Result(
-                true,
-                "launched $resolved (foreground still ${service.currentPackage().ifBlank { "unknown" }})",
-            )
-        } catch (e: Exception) {
-            Result(false, "open_app failed: ${e.message}")
+            node.children.forEach(::walk)
         }
+        runCatching { service.getVisibleElements().forEach(::walk) }
+
+        // Prefer the smallest match: an icon rather than the container holding it.
+        return matches.minByOrNull { it.width().toLong() * it.height().toLong() }
     }
 
+    /** Human-readable app name for a package, for the instruction. */
+    private fun appLabelFor(packageName: String): String? = runCatching {
+        val pm = appContext.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+    }.getOrNull()
 
     private fun JsonObject.string(key: String): String? =
         this[key]?.jsonPrimitive?.contentOrNull
@@ -325,22 +213,26 @@ class ToolExecutor(
         return p.intOrNull ?: p.doubleOrNull?.toInt()
     }
 
-    private fun JsonObject.bool(key: String): Boolean? =
-        this[key]?.jsonPrimitive?.booleanOrNull
-
     companion object {
-        private const val SETTLE_MS = 350L
-        // Long enough that the guidance highlight actually registers before we act on it.
-        private const val POINTER_HOLD_MS = 750L
-        private const val GUIDE_WAIT_MS = 20_000L
-        private const val GUIDE_POLL_MS = 350L
+        /**
+         * Tools that guide, and so need the screen to be still before we read it: the
+         * cursor has to land where things actually are, and the baseline we compare against
+         * has to be the settled screen rather than the tail of the last transition.
+         */
+        private val GUIDING_TOOLS =
+            setOf("point_at", "type", "open_app", "scroll", "back", "home")
 
-        /** Tools that change the phone. In Guide mode none of these may run. */
-        private val ACTING_TOOLS = setOf(
-            "tap", "tap_xy", "type", "swipe", "scroll",
-            "open_app", "back", "home", "recents",
-        )
-        private const val OPEN_APP_WAIT_MS = 4_000L
-        private const val OPEN_APP_POLL_MS = 200L
+        private const val SETTLE_MS = 400L
+
+        /** How long someone gets to find the highlight and press it. */
+        private const val WAIT_MS = 30_000L
+        private const val POLL_MS = 500L
+
+        /** Consecutive polls that must agree the screen changed before we believe it. */
+        private const val CONFIRM_POLLS = 2
+
+        /** Repeat the instruction once, near the end, in case they missed it. */
+        private const val NUDGE_BEFORE_END_MS = 12_000L
+        private const val SPEAK_HOLD_MS = 4_000L
     }
 }

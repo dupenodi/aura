@@ -8,134 +8,84 @@ import com.drishti.ai.ChatBackend
 import com.drishti.ai.ChatModels
 import com.drishti.ai.LlmRouter
 import com.drishti.data.AuraPrefs
-import com.drishti.data.LockedToGuide
-import com.drishti.data.Routine
-import com.drishti.data.RoutineStore
+import com.drishti.data.SensitiveApps
 import com.drishti.data.TaskHistory
 import com.drishti.data.TaskOutcome
 import com.drishti.data.TaskRecord
-import com.drishti.eval.RunSession
-import com.drishti.eval.RunStore
-import com.drishti.overlay.ConfirmPromptOverlay
 import com.drishti.overlay.PointerOverlay
 import com.drishti.voice.SpeechOutput
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import java.util.UUID
 
+/**
+ * Runs one "show me how" session: look at the screen, decide the single next step, point
+ * at it, wait for the user, repeat.
+ */
 class AgentOrchestrator(
     private val appContext: Context,
     private val pointerOverlay: PointerOverlay,
-    private val confirmOverlay: ConfirmPromptOverlay,
     private val scope: CoroutineScope,
     private val client: ChatBackend = LlmRouter(),
 ) {
     private val speechOutput = SpeechOutput(appContext)
-    private val runStore = RunStore.get(appContext)
     private val prefs = AuraPrefs.get(appContext)
     private val history = TaskHistory.get(appContext)
-    private val routines = RoutineStore.get(appContext)
-    private val promptImprover = PromptImprover(appContext)
 
-    /** Steps taken in the current run, kept so a routine can learn its route. */
-    private val routeTaken = mutableListOf<String>()
     private var job: Job? = null
-    private var pendingAsk: CompletableDeferred<String>? = null
 
-    /** Steps actually executed in the current run, for the history entry. */
+    /** Steps shown in the current session, so history is right even if it ends badly. */
     private var stepsTaken = 0
 
     /** Notifies the UI when a task starts/stops so the avatar can show activity. */
     var onRunStateChanged: ((running: Boolean) -> Unit)? = null
 
-    /**
-     * Reports the current step and what it is doing, in plain language, so the run
-     * banner can keep the user informed rather than leaving them guessing.
-     */
-    var onProgress: ((step: Int, message: String) -> Unit)? = null
-
     fun cancel() {
         job?.cancel()
-        pendingAsk?.complete("cancelled")
-        pendingAsk = null
-        pointerOverlay.showStatus("Cancelled")
+        pointerOverlay.hide()
+        pointerOverlay.showStatus("Stopped")
     }
 
-    fun submitUserReply(text: String) {
-        pendingAsk?.complete(text)
-        pendingAsk = null
-    }
-
-    fun runTask(rawTask: String, routineId: String? = null) {
+    fun runTask(task: String) {
         job?.cancel()
-        // Agent loop must NOT run on Main — LLM + tree walks ANR otherwise.
+        // The agent loop must NOT run on Main — LLM calls and tree walks would ANR.
         job = scope.launch(Dispatchers.Default) {
-            stepsTaken = 0
-            routeTaken.clear()
             // Voice settings can change between runs; apply them before we speak.
             speechOutput.enabled = prefs.speakAloud.value
             speechOutput.setLanguage(prefs.language.value)
             onRunStateChanged?.invoke(true)
-            val mode = prefs.mode.value
-            var outcome = TaskOutcome.Completed
-            var detail: String? = null
 
-            // Sharpen the request before spending a full agent turn discovering intent.
-            pointerOverlay.showStatus("Thinking…")
-            val improved = promptImprover.improve(rawTask)
-            val task = resolveTask(improved, rawTask)
-            if (task == null) {
-                onRunStateChanged?.invoke(false)
-                return@launch
-            }
-
-            val session = runStore.begin(task)
+            stepsTaken = 0
+            var outcome = Outcome(TaskOutcome.Completed, null, 0)
             try {
-                runLoop(task, session, rawTask, routineId)
-                if (runStore.readManifest(session.runId)?.status == "running") {
-                    session.end("completed")
-                }
-                when (runStore.readManifest(session.runId)?.status) {
-                    "stuck", "step_limit", "blocked", "llm_error" -> {
-                        outcome = TaskOutcome.Stopped
-                        detail = stoppedDetail(runStore.readManifest(session.runId)?.status)
-                    }
-                }
+                outcome = runLoop(task)
             } catch (e: CancellationException) {
-                session.end("cancelled")
-                outcome = TaskOutcome.Cancelled
-                pointerOverlay.showStatus("Cancelled")
+                outcome = Outcome(TaskOutcome.Cancelled, null, stepsTaken)
+                pointerOverlay.hide()
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Agent failed", e)
-                session.end("error", e.message)
-                outcome = TaskOutcome.Stopped
                 val human = AgentErrors.humanise(e.message)
-                detail = human
+                outcome = Outcome(TaskOutcome.Stopped, human, stepsTaken)
+                pointerOverlay.hide()
                 pointerOverlay.showStatus(human, 6000)
                 speechOutput.speak(human)
             } finally {
-                if (outcome == TaskOutcome.Completed) {
-                    val routine = routineId?.let { routines.byId(it) }
-                        ?: routines.matching(rawTask)
-                    routine?.let { routines.recordRun(it.id, routeTaken.toList()) }
-                }
                 history.add(
                     TaskRecord(
-                        id = session.runId,
-                        task = rawTask.trim(),
-                        mode = mode,
-                        steps = stepsTaken,
-                        outcome = outcome,
-                        detail = detail,
+                        id = UUID.randomUUID().toString(),
+                        task = task.trim(),
+                        steps = outcome.steps,
+                        outcome = outcome.result,
+                        detail = outcome.detail,
                     ),
                 )
                 onRunStateChanged?.invoke(false)
@@ -143,103 +93,29 @@ class AgentOrchestrator(
         }
     }
 
-    /**
-     * Applies the improver's result: if it decided the request is genuinely ambiguous,
-     * ask that question first and fold the answer back in rather than guessing.
-     */
-    private suspend fun resolveTask(improved: PromptImprover.Improved, rawTask: String): String? {
-        val question = improved.clarifyingQuestion ?: return improved.task
-        pointerOverlay.showStatus(question, 6000)
-        speechOutput.speak(question)
-        val answer = confirmOverlay.ask(question)
-        if (answer.isBlank()) {
-            pointerOverlay.showStatus("Cancelled")
-            return null
-        }
-        return "${rawTask.trim()}\n\nUser clarified: $answer"
-    }
+    private data class Outcome(
+        val result: TaskOutcome,
+        val detail: String?,
+        val steps: Int,
+    )
 
-    /** One short human sentence for what a tool call is doing, for the run banner. */
-    private fun describeStep(name: String, input: JsonObject): String = when (name) {
-        "tap", "tap_xy" -> "Tapping"
-        "type" -> "Typing"
-        "scroll" -> "Scrolling"
-        "swipe" -> "Swiping"
-        "open_app" -> "Opening an app"
-        "back" -> "Going back"
-        "home" -> "Going home"
-        "recents" -> "Opening recents"
-        "wait_for_change" -> "Waiting for the screen"
-        "speak" -> "Explaining"
-        "ask_user" -> "Waiting for your answer"
-        "done" -> "Finishing up"
-        else -> "Working"
-    }
-
-    /** The route a previous successful run of this task followed, if we have one. */
-    private fun knownRoute(rawTask: String, routineId: String?): List<String>? {
-        val routine = routineId?.let { routines.byId(it) } ?: routines.matching(rawTask)
-        return routine?.learnedRoute?.takeIf { it.isNotEmpty() }
-    }
-
-    private fun stoppedDetail(status: String?): String = when (status) {
-        "stuck" -> "Stopped — couldn't find the next step"
-        "step_limit" -> "Stopped — took too many steps"
-        "blocked" -> "Stopped — needs permission"
-        "llm_error" -> "Stopped — couldn't reach the model"
-        else -> "Stopped"
-    }
-
-    private suspend fun runLoop(
-        task: String,
-        session: RunSession,
-        rawTask: String = task,
-        routineId: String? = null,
-    ) {
+    private suspend fun runLoop(task: String): Outcome {
         ActionLog.clear()
         ActionLog.append("TASK: $task")
-        ActionLog.append("RUN: ${session.runId}")
-        if (client is LlmRouter) {
-            ActionLog.append("LLM chain: ${client.selectedProviderIds().joinToString(" → ")}")
-        } else {
-            ActionLog.append("LLM: ${client.providerId}")
-        }
-        speechOutput.speak("On it")
-        pointerOverlay.showStatus("Working…")
-        onProgress?.invoke(0, "Looking at the screen")
+        speechOutput.speak("Let me show you")
+        pointerOverlay.showStatus("Looking at your screen…")
 
         val executor = ToolExecutor(
             appContext = appContext,
             pointerOverlay = pointerOverlay,
-            confirmOverlay = confirmOverlay,
             speechOutput = speechOutput,
-            modeFor = { pkg -> prefs.effectiveMode(pkg) },
-            autoSpeed = { prefs.autoSpeed.value },
-            askUserHandler = { question ->
-                val deferred = CompletableDeferred<String>()
-                pendingAsk = deferred
-                pointerOverlay.showStatus("Waiting for answer…")
-                deferred.await()
-            },
         )
 
-        val messages = mutableListOf<ChatModels.Message>()
-        messages.add(
+        val messages = mutableListOf(
             ChatModels.Message(
                 role = "user",
                 content = buildString {
-                    appendLine("Task: $task")
-                    appendLine()
-                    appendLine("Mode: ${prefs.mode.value.name}")
-                    knownRoute(rawTask, routineId)?.let { route ->
-                        appendLine()
-                        appendLine("This task has been done on this phone before. What worked:")
-                        route.forEachIndexed { i, step -> appendLine("${i + 1}. $step") }
-                        appendLine(
-                            "Follow it when the screens match, but verify each step — " +
-                                "apps change and a stale route is worse than none.",
-                        )
-                    }
+                    appendLine("The user asked: $task")
                     appendLine()
                     // Sent once, not per turn: this is what stops the model inventing
                     // package names and then claiming an installed app is missing.
@@ -255,85 +131,44 @@ class AgentOrchestrator(
         )
 
         var steps = 0
-        var lastFp = ""
         val progress = ProgressGuard()
         var forcedToolRetry = false
 
         while (coroutineContext.isActive && steps < MAX_STEPS) {
             val service = ScreenAgentAccessibilityService.getInstance()
             if (service == null) {
-                pointerOverlay.showStatus(
-                    "I've lost permission to read the screen — turn Aura back on in Accessibility settings.",
-                    6000,
+                return stop(
+                    steps,
+                    "I've lost permission to read the screen — turn Aura back on in " +
+                        "Accessibility settings.",
                 )
-                speechOutput.speak("I've lost permission to read the screen")
-                session.end("blocked", "accessibility_disabled")
-                return
             }
 
-            // Banking/health/password apps are never read. This is enforced here rather
-            // than in settings, because the privacy screen states it as unconditional.
-            if (LockedToGuide.isLocked(service.currentPackage())) {
-                pointerOverlay.hide()
-                pointerOverlay.showStatus(
-                    "This looks like a banking app — I've stopped reading the screen.",
-                    5000,
-                )
-                speechOutput.speak("I've stopped reading the screen here")
-                session.end("blocked", "sensitive_app")
-                return
+            // Banking/health/password apps are never read. Enforced here rather than in
+            // settings, because the privacy screen states it as unconditional.
+            if (SensitiveApps.isSensitive(service.currentPackage())) {
+                return stop(steps, "This looks like a banking app — I've stopped reading the screen.")
             }
 
             val roots = withContext(Dispatchers.Default) { service.captureAgentTree() }
-            val treeJson = TreeJson.compactTreeString(roots)
-            val fingerprint = TreeJson.fingerprint(roots)
-            val actionable = TreeJson.actionableCount(roots)
             val pkg = service.currentPackage()
-            val screen = service.screenSize()
-            val history = ActionLog.recent(8).joinToString("\n")
+            val appLabel = DeviceContext.installedApps(appContext)
+                .firstOrNull { it.packageName == pkg }?.label
 
-            val useVision = VisionFallback.shouldUseVision(pkg, roots)
-            // Only capture when the vision fallback actually needs it: screenshots are the
-            // slowest step in the loop, and we promise never to store them on disk.
-            val screenshotForLlm = if (useVision) VisionFallback.captureScreenshotBase64() else null
-
-            session.recordObserve(
-                packageName = pkg,
-                treeJson = treeJson,
-                fingerprint = fingerprint,
-                actionableCount = actionable,
-                screenshotBase64 = null,
-                note = if (useVision) "vision_heuristic" else null,
-            )
-
-            val contextBlocks = mutableListOf<ChatModels.ContentBlock>(
-                ChatModels.ContentBlock.Text(
-                    buildString {
-                        val appLabel = DeviceContext.installedApps(appContext)
-                            .firstOrNull { it.packageName == pkg }?.label
-                        appendLine("Current app: ${appLabel ?: "unknown"} ($pkg)")
-                        appendLine("Screen: ${screen.width()}x${screen.height()}")
-                        appendLine("Action history:")
-                        appendLine(history.ifBlank { "(none)" })
+            messages.add(
+                ChatModels.Message(
+                    role = "user",
+                    content = buildString {
+                        appendLine("They are looking at: ${appLabel ?: "unknown"} ($pkg)")
+                        appendLine("What has happened so far:")
+                        appendLine(ActionLog.recent(6).joinToString("\n").ifBlank { "(nothing yet)" })
                         appendLine()
-                        appendLine("Accessibility tree (indexed):")
-                        appendLine(treeJson)
-                        if (screenshotForLlm != null) {
-                            appendLine()
-                            appendLine("Vision fallback active — screenshot attached. Prefer tap_xy if needed.")
-                        }
+                        appendLine("On screen now (indexed):")
+                        appendLine(TreeJson.compactTreeString(roots))
                     },
                 ),
             )
-            if (screenshotForLlm != null) {
-                contextBlocks.add(ChatModels.ContentBlock.Image(screenshotForLlm))
-            }
 
-            messages.add(
-                ChatModels.Message(role = "user", content = contextBlocks),
-            )
-
-            val llmStarted = System.currentTimeMillis()
             val response = try {
                 withContext(Dispatchers.IO) {
                     client.createMessage(
@@ -344,156 +179,101 @@ class AgentOrchestrator(
                     )
                 }
             } catch (e: CancellationException) {
-                session.end("cancelled")
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "LLM call failed", e)
-                session.recordLlm(
-                    provider = null,
-                    toolNames = emptyList(),
-                    durationMs = System.currentTimeMillis() - llmStarted,
-                    error = e.message,
-                )
-                val human = AgentErrors.humanise(e.message)
-                pointerOverlay.showStatus(human, 6000)
-                speechOutput.speak(human)
                 ActionLog.append("LLM ERROR: ${e.message}")
-                session.end("llm_error", e.message)
-                return
+                return stop(steps, AgentErrors.humanise(e.message))
             }
-            val toolUses = response.content.filter { it.type == "tool_use" }
-            session.recordLlm(
-                provider = response.provider ?: client.providerId,
-                toolNames = toolUses.map { it.name.orEmpty() },
-                durationMs = System.currentTimeMillis() - llmStarted,
-            )
-            ActionLog.append("LLM provider used: ${response.provider ?: client.providerId}")
 
-            val assistantBlocks = mutableListOf<ChatModels.ContentBlock>()
-            response.content.forEach { block ->
-                when (block.type) {
-                    "text" -> if (!block.text.isNullOrBlank()) {
-                        assistantBlocks.add(ChatModels.ContentBlock.Text(block.text))
-                    }
-                    "tool_use" -> assistantBlocks.add(
-                        ChatModels.ContentBlock.ToolUse(
-                            id = block.id.orEmpty(),
-                            name = block.name.orEmpty(),
-                            input = block.input ?: buildJsonObject {},
-                        ),
-                    )
-                }
-            }
-            messages.add(ChatModels.Message(role = "assistant", content = assistantBlocks))
+            val toolUses = response.content.filter { it.type == "tool_use" }
+            messages.add(
+                ChatModels.Message(
+                    role = "assistant",
+                    content = response.content.mapNotNull { block ->
+                        when (block.type) {
+                            "text" -> block.text?.takeIf { it.isNotBlank() }
+                                ?.let { ChatModels.ContentBlock.Text(it) }
+                            "tool_use" -> ChatModels.ContentBlock.ToolUse(
+                                id = block.id.orEmpty(),
+                                name = block.name.orEmpty(),
+                                input = block.input ?: buildJsonObject {},
+                            )
+                            else -> null
+                        }
+                    },
+                ),
+            )
 
             if (toolUses.isEmpty()) {
-                val text = response.content.firstOrNull { it.type == "text" }?.text
                 if (!forcedToolRetry) {
                     forcedToolRetry = true
-                    session.recordNote("no_tools_retry", text ?: "empty tool list")
                     messages.add(
                         ChatModels.Message(
                             role = "user",
-                            content = "You must call a tool this turn. " +
-                                "If you need information from the user, call ask_user(question). " +
-                                "If the task is finished, call done(summary). " +
-                                "Do not reply with text only.",
+                            content = "You must call a tool this turn — point_at for the next " +
+                                "step, or done(summary) if they have got there. Never reply " +
+                                "with text alone.",
                         ),
                     )
                     continue
                 }
-                pointerOverlay.showStatus(text?.take(80) ?: "No action")
-                session.recordNote("no_tools", text ?: "empty tool list")
-                session.end("completed_no_tools")
-                return
+                return stop(steps, "I'm not sure what to show you next")
             }
             forcedToolRetry = false
 
-            val toolResults = mutableListOf<ChatModels.ContentBlock>()
-            var finished = false
+            // One step at a time is the whole model here: anything past the first tool
+            // was decided against a screen the user has not reached yet.
+            val tool = toolUses.first()
+            val name = tool.name.orEmpty()
+            val input = tool.input ?: JsonObject(emptyMap())
 
-            for (tool in toolUses) {
-                if (!coroutineContext.isActive) break
-                steps++
-                stepsTaken = steps
-                val name = tool.name.orEmpty()
-                val input = tool.input ?: JsonObject(emptyMap())
-                val fpBefore = lastFp.ifBlank { fingerprint }
-                val result = executor.execute(name, input)
+            steps++
+            stepsTaken = steps
+            val result = executor.execute(name, input)
 
-                val actionKey = "$name:${input}"
-                val stuckRepeat = progress.record(name, input.toString())
-                val stuckNoChange = if (result.fingerprintAfter.isNotEmpty()) {
-                    progress.recordFingerprint(result.fingerprintAfter, name)
-                } else {
-                    false
-                }
-                if (result.fingerprintAfter.isNotEmpty()) {
-                    lastFp = result.fingerprintAfter
-                }
-
-                if (result.ok) routeTaken.add("$name ${input}".take(160))
-                onProgress?.invoke(steps, describeStep(name, input))
-
-                session.recordTool(
-                    step = steps,
-                    name = name,
-                    args = input.toString(),
-                    result = result.message,
-                    ok = result.ok,
-                    fingerprintBefore = fpBefore,
-                    fingerprintAfter = result.fingerprintAfter.ifBlank { fpBefore },
-                )
-
-                toolResults.add(
-                    ChatModels.ContentBlock.ToolResult(
-                        toolUseId = tool.id.orEmpty(),
-                        content = result.message,
-                        isError = !result.ok,
+            messages.add(
+                ChatModels.Message(
+                    role = "user",
+                    content = listOf(
+                        ChatModels.ContentBlock.ToolResult(
+                            toolUseId = tool.id.orEmpty(),
+                            content = result.message,
+                            isError = !result.ok,
+                        ),
                     ),
-                )
-
-                if (result.done) {
-                    finished = true
-                    session.end("done", result.message)
-                    break
-                }
-                if (stuckRepeat) {
-                    markStuck(
-                        session,
-                        speechOutput,
-                        pointerOverlay,
-                        "repeated identical action: $actionKey",
-                    )
-                    finished = true
-                    break
-                }
-                if (stuckNoChange) {
-                    markStuck(
-                        session,
-                        speechOutput,
-                        pointerOverlay,
-                        "no tree change for ${progress.noChangeStreak} actions",
-                    )
-                    finished = true
-                    break
-                }
-                if (steps >= MAX_STEPS) break
-            }
-
-            messages.add(ChatModels.Message(role = "user", content = toolResults))
+                ),
+            )
             pruneMessages(messages)
 
-            if (finished) break
+            if (result.done) {
+                // A step the user never did ends the session too — but honestly, so the
+                // history doesn't claim they finished something they walked away from.
+                return if (result.ok) {
+                    Outcome(TaskOutcome.Completed, null, steps)
+                } else {
+                    Outcome(TaskOutcome.Stopped, "Left you partway — you didn't take the step", steps)
+                }
+            }
+
+            if (progress.record(name, input.toString())) {
+                ActionLog.append("STUCK: repeated $name")
+                return stop(steps, "I've shown you that step already — let's stop there")
+            }
         }
 
         if (steps >= MAX_STEPS) {
-            speechOutput.speak("Step limit reached")
-            pointerOverlay.showStatus("Step limit reached")
-            session.end("step_limit")
-        } else if (runStore.readManifest(session.runId)?.status == "running") {
-            session.end(if (!coroutineContext.isActive) "cancelled" else "completed")
+            return stop(steps, "That's as far as I can take you for now")
         }
+        return Outcome(TaskOutcome.Cancelled, null, steps)
+    }
+
+    /** Ends the run with something the user can actually understand. */
+    private fun stop(steps: Int, message: String): Outcome {
+        pointerOverlay.hide()
+        pointerOverlay.showStatus(message, 6000)
+        speechOutput.speak(message)
+        return Outcome(TaskOutcome.Stopped, message, steps)
     }
 
     private fun pruneMessages(messages: MutableList<ChatModels.Message>) {
@@ -503,19 +283,6 @@ class AgentOrchestrator(
         messages.clear()
         messages.add(head)
         messages.addAll(tail)
-    }
-
-    private fun markStuck(
-        session: RunSession,
-        speechOutput: SpeechOutput,
-        pointerOverlay: PointerOverlay,
-        reason: String,
-    ) {
-        speechOutput.speak("I'm stuck")
-        pointerOverlay.showStatus("I'm stuck")
-        ActionLog.append("STUCK: $reason")
-        session.recordNote("stuck", reason)
-        session.end("stuck")
     }
 
     companion object {

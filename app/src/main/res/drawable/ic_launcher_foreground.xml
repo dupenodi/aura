@@ -1,16 +1,69 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Aurora orb — matches OrbSkin.Aurora / AuraOrb. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#F5F5F5"
-        android:pathData="M54,28c-8,0 -14,6 -14,14v10c0,2.2 1.8,4 4,4h4v8c0,3.3 2.7,6 6,6s6,-2.7 6,-6v-8h4c2.2,0 4,-1.8 4,-4V42c0,-8 -6,-14 -14,-14z" />
-    <path
-        android:fillColor="#FF6B35"
-        android:pathData="M48,70h12v6c0,3.3 -2.7,6 -6,6s-6,-2.7 -6,-6v-6z" />
-    <path
-        android:fillColor="#FF6B35"
-        android:pathData="M42,40h24v8H42z" />
+
+    <!-- Soft cyan halo -->
+    <path android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="40">
+                <item
+                    android:offset="0"
+                    android:color="#994DE8FF" />
+                <item
+                    android:offset="0.55"
+                    android:color="#334DE8FF" />
+                <item
+                    android:offset="1"
+                    android:color="#004DE8FF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Sphere — light source upper-left (≈34%/28%) -->
+    <path android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="45.2"
+                android:centerY="42.7"
+                android:gradientRadius="50.7">
+                <item
+                    android:offset="0"
+                    android:color="#FF7EF2FF" />
+                <item
+                    android:offset="0.56"
+                    android:color="#FF6B4DFF" />
+                <item
+                    android:offset="1"
+                    android:color="#FF2A1361" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Rim light so the sphere doesn't read flat -->
+    <path android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="26">
+                <item
+                    android:offset="0.72"
+                    android:color="#00FFFFFF" />
+                <item
+                    android:offset="1"
+                    android:color="#28FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
 </vector>

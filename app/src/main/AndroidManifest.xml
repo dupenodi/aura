@@ -41,11 +41,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".accessibility.ScreenCaptureActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-
         <service
             android:name=".accessibility.ScreenAgentAccessibilityService"
             android:exported="true"
@@ -66,7 +61,7 @@
             android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Floating assistant overlay that guides and acts on screen" />
+                android:value="Floating assistant overlay that guides the user through on-screen steps" />
         </service>
     </application>
 </manifest>

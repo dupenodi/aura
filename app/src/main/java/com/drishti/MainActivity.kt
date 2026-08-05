@@ -22,9 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import com.drishti.data.AuraMode
 import com.drishti.data.AuraPrefs
-import com.drishti.data.AutoSpeed
 import com.drishti.data.RoutineStore
 import com.drishti.data.TaskHistory
 import com.drishti.voice.RemoteSpeech
@@ -33,7 +31,6 @@ import com.drishti.overlay.BubbleService
 import com.drishti.ui.home.HomeScreen
 import com.drishti.ui.onboarding.OnboardingFlow
 import com.drishti.ui.onboarding.PermissionState
-import com.drishti.ui.settings.ModeScreen
 import com.drishti.ui.settings.PresenceScreen
 import com.drishti.ui.settings.PrivacyScreen
 import com.drishti.ui.routines.RoutinesScreen
@@ -42,7 +39,7 @@ import com.drishti.ui.settings.SettingsScreen
 import com.drishti.ui.theme.AuraTheme
 
 /** Where the user currently is inside the app shell. */
-private enum class Route { Home, Settings, Mode, Presence, Privacy, Language, Routines }
+private enum class Route { Home, Settings, Presence, Privacy, Language, Routines }
 
 /** Extra carrying a task to run straight away (launcher shortcut / assistant handoff). */
 private const val EXTRA_TASK = "task"
@@ -77,10 +74,8 @@ class MainActivity : ComponentActivity() {
                 OnResume { permissionEpoch++ }
 
                 val permissions = remember(permissionEpoch) { readPermissions() }
-                val mode by prefs.mode.collectAsState()
                 val orbSkin by prefs.orbSkin.collectAsState()
                 val glow by prefs.glow.collectAsState()
-                val autoSpeed by prefs.autoSpeed.collectAsState()
                 val speakAloud by prefs.speakAloud.collectAsState()
                 val hideInFullscreen by prefs.hideInFullscreen.collectAsState()
                 val paused by prefs.paused.collectAsState()
@@ -106,10 +101,8 @@ class MainActivity : ComponentActivity() {
                         permissions = permissions,
                         orbSkin = orbSkin,
                         glow = glow,
-                        mode = mode,
                         onOrbSkin = prefs::setOrbSkin,
                         onGlow = prefs::setGlow,
-                        onMode = prefs::setMode,
                         onRequestAccessibility = { openAccessibilitySettings() },
                         onRequestOverlay = { openOverlaySettings() },
                         onRequestMic = { micPermission.launch(Manifest.permission.RECORD_AUDIO) },
@@ -137,7 +130,6 @@ class MainActivity : ComponentActivity() {
                 when (route) {
                     Route.Home -> HomeScreen(
                         records = records,
-                        mode = mode,
                         orbSkin = orbSkin,
                         glow = glow,
                         active = !paused && permissions.accessibility && permissions.overlay,
@@ -150,37 +142,20 @@ class MainActivity : ComponentActivity() {
                     )
 
                     Route.Settings -> SettingsScreen(
-                        mode = mode,
-                        overrideCount = prefs.overrideCount(),
-                        autoSpeed = autoSpeed,
                         orbSkin = orbSkin,
                         glow = glow,
                         speakAloud = speakAloud,
                         hideInFullscreen = hideInFullscreen,
                         permissionsGranted = permissions.accessibility && permissions.overlay,
                         onBack = { route = Route.Home },
-                        onOpenMode = { route = Route.Mode },
                         onOpenPresence = { route = Route.Presence },
                         onOpenPrivacy = { route = Route.Privacy },
                         onOpenLanguage = { route = Route.Language },
                         onOpenRoutines = { route = Route.Routines },
                         language = language,
-                        onCycleAutoSpeed = {
-                            val next = AutoSpeed.fromOrdinal(
-                                (autoSpeed.ordinal + 1) % AutoSpeed.entries.size,
-                            )
-                            prefs.setAutoSpeed(next)
-                        },
                         onSpeakAloud = prefs::setSpeakAloud,
                         onHideInFullscreen = prefs::setHideInFullscreen,
                         onOpenPermissions = { openAccessibilitySettings() },
-                    )
-
-                    Route.Mode -> ModeScreen(
-                        mode = mode,
-                        onMode = prefs::setMode,
-                        overrides = emptyList(),
-                        onBack = { route = Route.Settings },
                     )
 
                     Route.Presence -> PresenceScreen(
@@ -204,12 +179,9 @@ class MainActivity : ComponentActivity() {
                     Route.Routines -> RoutinesScreen(
                         routines = routines,
                         onRun = { routine ->
+                            routineStore.recordRun(routine.id)
                             BubbleService.start(this@MainActivity)
-                            BubbleService.runRoutine(
-                                this@MainActivity,
-                                routine.task,
-                                routine.id,
-                            )
+                            BubbleService.runTask(this@MainActivity, routine.task)
                             moveTaskToBack(true)
                         },
                         onDelete = { routineStore.delete(it.id) },

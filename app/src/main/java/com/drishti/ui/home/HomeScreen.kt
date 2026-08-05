@@ -28,7 +28,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.drishti.data.AuraMode
 import com.drishti.data.TaskOutcome
 import com.drishti.data.TaskRecord
 import com.drishti.ui.theme.Aura
@@ -44,7 +43,6 @@ import com.drishti.ui.theme.OrbSkin
 @Composable
 fun HomeScreen(
     records: List<TaskRecord>,
-    mode: AuraMode,
     orbSkin: OrbSkin,
     glow: GlowLevel,
     active: Boolean,
@@ -68,7 +66,7 @@ fun HomeScreen(
             Column(Modifier.weight(1f)) {
                 Text("Aura", style = MaterialTheme.typography.titleLarge)
                 AuraEyebrow(
-                    text = "${mode.shortLabel} mode · ${if (active) "active" else "paused"}",
+                    text = if (active) "Ready to help" else "Paused",
                     color = if (active) Aura.Cyan else Aura.TextGhost,
                 )
             }

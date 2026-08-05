@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Mirrors mobilerun-portal capabilities. isAccessibilityTool is required on Android 14+
-    so accessibilityDataSensitive views (e.g. Settings) are readable.
+    Read-only by design: Aura points at things, it never taps them, so it asks for neither
+    gesture dispatch nor screenshots. isAccessibilityTool is required on Android 14+ so
+    accessibilityDataSensitive views (e.g. Settings) are readable.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagIncludeNotImportantViews|flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
-    android:canTakeScreenshot="true"
-    android:canPerformGestures="true"
     android:description="@string/accessibility_service_description"
     android:isAccessibilityTool="true"
     android:notificationTimeout="100"

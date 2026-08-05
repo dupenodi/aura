@@ -2,12 +2,8 @@ package com.drishti.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.graphics.Rect
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -16,13 +12,10 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
-import kotlinx.coroutines.delay
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 
 /**
- * Accessibility service core — tree collection, typing, screenshots.
+ * Accessibility service core — read-only tree collection and index resolution.
  * Algorithms ported from mobilerun-portal MobilerunAccessibilityService.
  */
 class ScreenAgentAccessibilityService : AccessibilityService() {
@@ -33,23 +26,11 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
         internal const val VISIBLE_ELEMENTS_STALE_GRACE_MS = 750L
         private const val REFRESH_INTERVAL_MS = 250L
         private const val MIN_FRAME_TIME_MS = 16L
-        private const val FOCUS_SETTLE_MS = 200L
 
         @Volatile
         private var instance: ScreenAgentAccessibilityService? = null
 
         fun getInstance(): ScreenAgentAccessibilityService? = instance
-
-        fun calculateInputText(
-            currentText: String?,
-            hintText: String?,
-            newText: String,
-            clear: Boolean,
-            selectionStart: Int? = null,
-            selectionEnd: Int? = null,
-        ): String = InputTextLogic.calculateInputText(
-            currentText, hintText, newText, clear, selectionStart, selectionEnd,
-        )
 
         internal fun shouldReuseVisibleElementsSnapshot(
             cachedElementCount: Int,
@@ -74,6 +55,21 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
                 snapshotScreenHeight == currentScreenHeight
         }
 
+        /**
+         * Whether an event says anything about which app is in front.
+         *
+         * Our own package never does: the orb and the highlight are our windows, and they
+         * raise events like anything else. Nor does a content change — the status bar clock
+         * ticking over is not the user going somewhere.
+         */
+        internal fun isForegroundPackageSignal(
+            eventPackage: String,
+            eventType: Int,
+            ownPackage: String,
+        ): Boolean = eventPackage.isNotEmpty() &&
+            eventPackage != ownPackage &&
+            eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+
         internal fun updateScreenBounds(bounds: Rect, width: Int, height: Int): Boolean {
             val safeWidth = width.coerceAtLeast(0)
             val safeHeight = height.coerceAtLeast(0)
@@ -93,8 +89,19 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isProcessing = AtomicBoolean(false)
     private var lastUpdateTime = 0L
+    @Volatile
     private var currentPackageName: String = ""
+
+    @Volatile
     private var currentActivityName: String = ""
+
+    /**
+     * Package owning the active window, read from the tree itself rather than from events.
+     * Events also arrive from keyboards, the status bar and our own overlay windows, so
+     * they are a poor answer to "which app is the user actually in".
+     */
+    @Volatile
+    private var activeWindowPackageName: String = ""
     private val visibleElements = mutableListOf<ElementNode>()
     private var visibleElementsSnapshotTimeMs = 0L
     private var visibleElementsSnapshotPackageName = ""
@@ -108,14 +115,6 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
      */
     private val publishedBounds = mutableMapOf<Int, Rect>()
     private var publishedPackageName: String = ""
-
-    /** Optional hook so overlays can hide drawing during screenshots. */
-    var overlayDrawingController: OverlayDrawingController? = null
-
-    interface OverlayDrawingController {
-        fun isDrawingEnabled(): Boolean
-        fun setDrawingEnabled(enabled: Boolean)
-    }
 
     private val updateRunnable = object : Runnable {
         override fun run() {
@@ -132,16 +131,20 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        serviceInfo = AccessibilityServiceInfo().apply {
-            eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+        // Amend the manifest config rather than replacing it. A fresh
+        // AccessibilityServiceInfo dropped flagIncludeNotImportantViews, losing the
+        // untagged containers that much of the tree hangs off.
+        //
+        // Touch exploration is deliberately not requested: it makes a single tap announce
+        // rather than activate, which would stop the user completing the very step we just
+        // pointed them at.
+        serviceInfo = (serviceInfo ?: AccessibilityServiceInfo()).apply {
             packageNames = null
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+            flags = flags or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_2_FINGER_PASSTHROUGH
-            }
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
         }
         refreshScreenBounds()
         startPeriodicUpdates()
@@ -149,22 +152,21 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val eventPackage = event?.packageName?.toString() ?: ""
-        val eventClassName = event?.className?.toString() ?: ""
+        if (event == null) return
+        val eventPackage = event.packageName?.toString() ?: ""
+        val eventClassName = event.className?.toString() ?: ""
 
-        if (eventPackage.isNotEmpty() &&
-            eventPackage != currentPackageName &&
-            currentPackageName.isNotEmpty()
-        ) {
-            clearVisibleElementSnapshot()
+        // Our own overlays raise events like any other window. Letting them through flipped
+        // the tracked package to com.drishti the instant a highlight was drawn, which the
+        // guidance loop read as "they navigated somewhere" and moved on without them.
+        if (!isForegroundPackageSignal(eventPackage, event.eventType, packageName)) return
+
+        if (eventPackage != currentPackageName && currentPackageName.isNotEmpty()) {
+            synchronized(visibleElements) { clearVisibleElementSnapshot() }
         }
-        if (eventPackage.isNotEmpty()) {
-            currentPackageName = eventPackage
-        }
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            if (eventClassName.isNotEmpty() && !eventClassName.startsWith("android.")) {
-                currentActivityName = eventClassName
-            }
+        currentPackageName = eventPackage
+        if (eventClassName.isNotEmpty() && !eventClassName.startsWith("android.")) {
+            currentActivityName = eventClassName
         }
         // Tree refresh is periodic (250ms), not event-driven — portal behavior.
     }
@@ -185,11 +187,15 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
-    fun currentPackage(): String = currentPackageName
-
-    fun currentActivity(): String = currentActivityName
-
-    fun screenSize(): Rect = refreshScreenBounds()
+    /**
+     * The app the user is actually looking at.
+     *
+     * Prefers the active window's own package. Event packages are a fallback only: they
+     * also come from keyboards, the status bar and our own overlay, and trusting them here
+     * both defeated the sensitive-app check and made the guidance loop believe the user had
+     * navigated away.
+     */
+    fun currentPackage(): String = activeWindowPackageName.ifEmpty { currentPackageName }
 
     fun getVisibleElements(): MutableList<ElementNode> = getVisibleElementsInternal()
 
@@ -227,12 +233,6 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
             }
         }
         return null
-    }
-
-    fun publishedBoundsForIndex(index: Int): Rect? {
-        synchronized(visibleElements) {
-            return publishedBounds[index]?.let { Rect(it) }
-        }
     }
 
     data class TapTarget(val bounds: Rect, val element: ElementNode?)
@@ -356,7 +356,10 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Unable to read active accessibility root: ${e.message}", e)
             null
         }
-        activeRoot?.let { return listOf(it to 0) }
+        activeRoot?.let {
+            noteActiveWindowPackage(it)
+            return listOf(it to 0)
+        }
 
         val windows = try {
             windows
@@ -379,12 +382,29 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
                         Log.e(TAG, "Unable to read window root: ${e.message}", e)
                         null
                     }
-                    if (root != null) out.add(root to window.layer)
+                    if (root != null) {
+                        if (out.isEmpty()) noteActiveWindowPackage(root)
+                        out.add(root to window.layer)
+                    }
                 }
         } finally {
             windows.forEach { it.recycle() }
         }
         return out
+    }
+
+    /**
+     * Records which app owns the tree we are about to read. Our own package is ignored: the
+     * orb and the highlight are ours, and neither means the user left the app they are in.
+     */
+    private fun noteActiveWindowPackage(root: AccessibilityNodeInfo) {
+        val pkg = try {
+            root.packageName?.toString().orEmpty()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Unable to read active window package: ${e.message}")
+            ""
+        }
+        if (pkg.isNotEmpty() && pkg != packageName) activeWindowPackageName = pkg
     }
 
     private fun isUserFacingWindow(window: AccessibilityWindowInfo): Boolean =
@@ -501,362 +521,6 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in collectVisibleElements: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Focus an editable field (optional overlay index), then ACTION_SET_TEXT.
-     * If SET_TEXT fails, fall back to clipboard + ACTION_PASTE — the standard a11y path
-     * when apps reject direct set-text without a focused IME target.
-     */
-    suspend fun inputText(
-        text: String,
-        clear: Boolean = true,
-        overlayIndex: Int? = null,
-    ): Boolean {
-        val root = rootInActiveWindow ?: return false
-        var ownedTarget: AccessibilityNodeInfo? = null
-        var focusedAfterClick: AccessibilityNodeInfo? = null
-        var writeOwned: AccessibilityNodeInfo? = null
-        try {
-            var targetNode: AccessibilityNodeInfo? = null
-            if (overlayIndex != null) {
-                val element = findElementByIndex(overlayIndex)
-                val fromElement = element?.nodeInfo
-                if (fromElement != null) {
-                    ownedTarget = AccessibilityNodeInfo.obtain(fromElement)
-                    targetNode = ownedTarget
-                }
-            }
-            if (targetNode == null) {
-                targetNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.also { ownedTarget = it }
-            }
-            if (targetNode == null) {
-                targetNode = findEditableNode(root)?.also { ownedTarget = it }
-            }
-            if (targetNode == null) return false
-
-            ensureEditableFocused(targetNode)
-            delay(FOCUS_SETTLE_MS)
-
-            focusedAfterClick = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            val writeTarget = when {
-                focusedAfterClick != null && focusedAfterClick.isEditable -> focusedAfterClick
-                targetNode.isEditable -> targetNode
-                else -> findEditableNode(root)?.also { writeOwned = it } ?: return false
-            }
-
-            if (setTextOnNode(writeTarget, text, clear)) return true
-            if (pasteViaClipboard(writeTarget, text, clear) &&
-                verifyTextLanded(writeTarget, text)
-            ) {
-                return true
-            }
-
-            // Last resort: some fields (ride-hailing search boxes especially) only wake up
-            // for a genuine touch, not ACTION_CLICK. Tap them for real, then try again.
-            val bounds = Rect().also { writeTarget.getBoundsInScreen(it) }
-            if (!bounds.isEmpty) {
-                GestureController.tap(bounds.centerX(), bounds.centerY())
-                delay(FOCUS_SETTLE_MS)
-                val refocused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                val retryTarget = refocused?.takeIf { it.isEditable } ?: writeTarget
-                if (setTextOnNode(retryTarget, text, clear)) return true
-                if (pasteViaClipboard(retryTarget, text, clear) &&
-                    verifyTextLanded(retryTarget, text)
-                ) {
-                    return true
-                }
-            }
-
-            Log.w(TAG, "inputText failed SET_TEXT, PASTE and touch retry for len=${text.length}")
-            return false
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting text: ${e.message}")
-            return false
-        } finally {
-            recycleQuietly(writeOwned)
-            recycleQuietly(focusedAfterClick)
-            recycleQuietly(ownedTarget)
-            recycleQuietly(root)
-        }
-    }
-
-    private fun recycleQuietly(node: AccessibilityNodeInfo?) {
-        if (node == null) return
-        try {
-            node.recycle()
-        } catch (_: Exception) {
-        }
-    }
-
-    fun clickElement(element: ElementNode): Boolean {
-        val clicked = runCatching {
-            element.nodeInfo.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        }.getOrDefault(false)
-        if (clicked) return true
-        return false
-    }
-
-    /**
-     * Prefer native scroll on the largest scrollable node; gesture swipe is the fallback.
-     * @return true if a scroll action was accepted
-     */
-    suspend fun scroll(direction: String): Boolean {
-        val forward = when (direction.lowercase()) {
-            "up", "backward", "left" -> false
-            else -> true
-        }
-        val action = if (forward) {
-            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-        } else {
-            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-        }
-        val root = rootInActiveWindow
-        if (root != null) {
-            try {
-                val scrollable = findLargestScrollable(root)
-                if (scrollable != null) {
-                    val ok = runCatching { scrollable.performAction(action) }.getOrDefault(false)
-                    if (scrollable !== root) {
-                        runCatching { scrollable.recycle() }
-                    }
-                    if (ok) return true
-                }
-            } finally {
-                runCatching { root.recycle() }
-            }
-        }
-
-        val bounds = refreshScreenBounds()
-        val cx = bounds.centerX()
-        val cy = bounds.centerY()
-        val delta = (minOf(bounds.width(), bounds.height()) * 0.35f).toInt()
-        return if (forward) {
-            // Finger moves up → content scrolls down
-            GestureController.swipe(cx, cy + delta, cx, cy - delta, 350)
-        } else {
-            GestureController.swipe(cx, cy - delta, cx, cy + delta, 350)
-        }
-    }
-
-    private fun ensureEditableFocused(target: AccessibilityNodeInfo) {
-        runCatching { target.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
-        runCatching { target.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
-    }
-
-    private fun setTextOnNode(
-        targetNode: AccessibilityNodeInfo,
-        text: String,
-        clear: Boolean,
-    ): Boolean {
-        val currentText = targetNode.text?.toString()
-        val hintText = targetNode.hintText?.toString()
-        val effectiveCurrent =
-            if (!hintText.isNullOrEmpty() && currentText == hintText) ""
-            else currentText.orEmpty()
-        val currentLength = effectiveCurrent.length
-        val rawStart = targetNode.textSelectionStart
-        val rawEnd = targetNode.textSelectionEnd
-        val selectionStart =
-            if (rawStart >= 0) rawStart.coerceIn(0, currentLength) else currentLength
-        val selectionEnd =
-            if (rawEnd >= 0) rawEnd.coerceIn(0, currentLength) else selectionStart
-        val replaceStart = minOf(selectionStart, selectionEnd)
-
-        val finalText = calculateInputText(
-            currentText = currentText,
-            hintText = hintText,
-            newText = text,
-            clear = clear,
-            selectionStart = selectionStart,
-            selectionEnd = selectionEnd,
-        )
-        val desiredSelection =
-            if (clear) finalText.length
-            else (replaceStart + text.length).coerceIn(0, finalText.length)
-
-        val arguments = Bundle()
-        arguments.putCharSequence(
-            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-            finalText,
-        )
-        val setTextSuccess =
-            targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-        if (!setTextSuccess) return false
-        // Plenty of apps accept ACTION_SET_TEXT and then ignore it — custom search fields
-        // especially. Trusting the return value is why typing "succeeded" while the field
-        // stayed empty, so confirm the text actually landed before claiming success.
-        if (!verifyTextLanded(targetNode, text)) return false
-        setSelectionOnFocusedInput(targetNode, desiredSelection)
-        return true
-    }
-
-    /** Re-reads the node and checks our text is really in it. */
-    private fun verifyTextLanded(node: AccessibilityNodeInfo, expected: String): Boolean {
-        if (expected.isEmpty()) return true
-        return runCatching {
-            node.refresh()
-            val actual = node.text?.toString().orEmpty()
-            actual.contains(expected, ignoreCase = true)
-        }.getOrDefault(true) // A node we can't re-read is not evidence of failure.
-    }
-
-    private fun pasteViaClipboard(
-        targetNode: AccessibilityNodeInfo,
-        text: String,
-        clear: Boolean,
-    ): Boolean {
-        return try {
-            if (clear) {
-                val clearArgs = Bundle().apply {
-                    putCharSequence(
-                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                        "",
-                    )
-                }
-                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
-            }
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("drishti", text))
-            ensureEditableFocused(targetNode)
-            targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-        } catch (e: Exception) {
-            Log.e(TAG, "pasteViaClipboard failed: ${e.message}")
-            false
-        }
-    }
-
-    private fun findEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (node.isEditable) return AccessibilityNodeInfo.obtain(node)
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val found = findEditableNode(child)
-            child.recycle()
-            if (found != null) return found
-        }
-        return null
-    }
-
-    private fun findLargestScrollable(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        var best: AccessibilityNodeInfo? = null
-        var bestArea = 0
-        fun visit(n: AccessibilityNodeInfo) {
-            if (n.isScrollable) {
-                val r = Rect()
-                n.getBoundsInScreen(r)
-                val area = abs(r.width() * r.height())
-                if (area > bestArea) {
-                    best?.let { if (it !== node) runCatching { it.recycle() } }
-                    best = AccessibilityNodeInfo.obtain(n)
-                    bestArea = area
-                }
-            }
-            for (i in 0 until n.childCount) {
-                val child = n.getChild(i) ?: continue
-                visit(child)
-                child.recycle()
-            }
-        }
-        visit(node)
-        return best
-    }
-
-    private fun setSelectionOnFocusedInput(
-        targetNode: AccessibilityNodeInfo,
-        selection: Int,
-    ): Boolean {
-        val args = Bundle().apply {
-            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, selection)
-            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, selection)
-        }
-        if (targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)) {
-            return true
-        }
-        val focusedNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
-        return try {
-            focusedNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
-        } finally {
-            try {
-                if (focusedNode != targetNode) focusedNode.recycle()
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    fun takeScreenshotBase64(hideOverlay: Boolean = true): CompletableFuture<String> {
-        val future = CompletableFuture<String>()
-        val controller = overlayDrawingController
-        val wasEnabled = if (hideOverlay && controller != null) {
-            val enabled = controller.isDrawingEnabled()
-            controller.setDrawingEnabled(false)
-            enabled
-        } else {
-            true
-        }
-
-        try {
-            if (hideOverlay) {
-                mainHandler.postDelayed({
-                    performScreenshotCapture(future, wasEnabled, hideOverlay)
-                }, 100)
-            } else {
-                performScreenshotCapture(future, wasEnabled, hideOverlay)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error taking screenshot", e)
-            future.complete("error: Failed to take screenshot: ${e.message}")
-            if (hideOverlay) controller?.setDrawingEnabled(wasEnabled)
-        }
-        return future
-    }
-
-    private fun performScreenshotCapture(
-        future: CompletableFuture<String>,
-        wasOverlayDrawingEnabled: Boolean,
-        hideOverlay: Boolean,
-    ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                AccessibilityScreenshotApi30.takeScreenshot(
-                    service = this,
-                    tag = TAG,
-                    onSuccess = { base64 ->
-                        try {
-                            future.complete(base64)
-                        } finally {
-                            if (hideOverlay) {
-                                overlayDrawingController?.setDrawingEnabled(wasOverlayDrawingEnabled)
-                            }
-                        }
-                    },
-                    onFailure = { message ->
-                        try {
-                            future.complete("error: $message")
-                        } finally {
-                            if (hideOverlay) {
-                                overlayDrawingController?.setDrawingEnabled(wasOverlayDrawingEnabled)
-                            }
-                        }
-                    },
-                )
-            } catch (e: Exception) {
-                future.complete("error: Failed to take screenshot: ${e.message}")
-                if (hideOverlay) {
-                    overlayDrawingController?.setDrawingEnabled(wasOverlayDrawingEnabled)
-                }
-            }
-        } else {
-            // API 26–29: MediaProjection path (requires prior user consent).
-            MediaProjectionScreenshotter.capture(this) { result ->
-                try {
-                    future.complete(result)
-                } finally {
-                    if (hideOverlay) {
-                        overlayDrawingController?.setDrawingEnabled(wasOverlayDrawingEnabled)
-                    }
-                }
-            }
         }
     }
 

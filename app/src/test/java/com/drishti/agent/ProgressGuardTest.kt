@@ -7,37 +7,34 @@ import org.junit.Test
 
 class ProgressGuardTest {
     @Test
-    fun repeatedIdenticalActionsTripStuck() {
+    fun repeatedIdenticalStepsTripStuck() {
         val guard = ProgressGuard()
-        assertFalse(guard.record("swipe", """{"a":1}"""))
-        assertFalse(guard.record("swipe", """{"a":1}"""))
-        assertTrue(guard.record("swipe", """{"a":1}"""))
+        assertFalse(guard.record("point_at", """{"index":3}"""))
+        assertFalse(guard.record("point_at", """{"index":3}"""))
+        assertTrue(guard.record("point_at", """{"index":3}"""))
     }
 
     @Test
-    fun differentActionsResetRepeatStreak() {
+    fun differentStepsResetRepeatStreak() {
         val guard = ProgressGuard()
-        assertFalse(guard.record("swipe", """{"a":1}"""))
-        assertFalse(guard.record("swipe", """{"a":1}"""))
-        assertFalse(guard.record("tap", """{"index":3}"""))
+        assertFalse(guard.record("point_at", """{"index":3}"""))
+        assertFalse(guard.record("point_at", """{"index":3}"""))
+        assertFalse(guard.record("point_at", """{"index":7}"""))
         assertEquals(0, guard.repeatActionStreak)
     }
 
     @Test
-    fun nonProgressToolsDoNotCount() {
+    fun sayingTheSameSentenceOverAndOverTripsStuck() {
         val guard = ProgressGuard()
-        assertFalse(guard.record("speak", """{"text":"hi"}"""))
-        assertFalse(guard.record("speak", """{"text":"hi"}"""))
-        assertFalse(guard.record("speak", """{"text":"hi"}"""))
-        assertEquals(0, guard.repeatActionStreak)
+        assertFalse(guard.record("speak", """{"text":"nearly there"}"""))
+        assertFalse(guard.record("speak", """{"text":"nearly there"}"""))
+        assertTrue(guard.record("speak", """{"text":"nearly there"}"""))
     }
 
     @Test
-    fun fingerprintNoChangeTripsAfterLimit() {
+    fun finishingIsNeverALoop() {
         val guard = ProgressGuard()
-        assertFalse(guard.recordFingerprint("a", "tap"))
-        assertFalse(guard.recordFingerprint("a", "tap"))
-        assertFalse(guard.recordFingerprint("a", "tap"))
-        assertTrue(guard.recordFingerprint("a", "tap"))
+        repeat(4) { assertFalse(guard.record("done", """{"summary":"ok"}""")) }
+        assertEquals(0, guard.repeatActionStreak)
     }
 }

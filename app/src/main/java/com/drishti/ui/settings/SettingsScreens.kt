@@ -30,9 +30,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.drishti.data.AuraMode
-import com.drishti.data.AutoSpeed
-import com.drishti.ui.onboarding.ModeOption
 import com.drishti.voice.AuraLanguage
 import com.drishti.ui.theme.Aura
 import com.drishti.ui.theme.AuraCard
@@ -76,22 +73,17 @@ private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
 
 @Composable
 fun SettingsScreen(
-    mode: AuraMode,
-    overrideCount: Int,
-    autoSpeed: AutoSpeed,
     orbSkin: OrbSkin,
     glow: GlowLevel,
     speakAloud: Boolean,
     hideInFullscreen: Boolean,
     permissionsGranted: Boolean,
     onBack: () -> Unit,
-    onOpenMode: () -> Unit,
     onOpenPresence: () -> Unit,
     onOpenPrivacy: () -> Unit,
     onOpenLanguage: () -> Unit,
     onOpenRoutines: () -> Unit,
     language: AuraLanguage,
-    onCycleAutoSpeed: () -> Unit,
     onSpeakAloud: (Boolean) -> Unit,
     onHideInFullscreen: (Boolean) -> Unit,
     onOpenPermissions: () -> Unit,
@@ -112,21 +104,6 @@ fun SettingsScreen(
         ) {
             SettingsGroup("Yours") {
                 AuraRow("Routines", divider = false, onClick = onOpenRoutines)
-            }
-
-            SettingsGroup("Behaviour") {
-                AuraRow("Default mode", value = mode.label, valueColor = Aura.Cyan, onClick = onOpenMode)
-                AuraRow(
-                    "Per-app overrides",
-                    value = if (overrideCount == 0) "None" else "$overrideCount apps",
-                    onClick = onOpenMode,
-                )
-                AuraRow(
-                    "Auto speed",
-                    value = autoSpeed.label,
-                    divider = false,
-                    onClick = onCycleAutoSpeed,
-                )
             }
 
             SettingsGroup("Presence") {
@@ -166,88 +143,6 @@ fun SettingsScreen(
                 )
                 AuraRow("What I can see", divider = false, onClick = onOpenPrivacy)
             }
-            Spacer(Modifier.height(20.dp))
-        }
-    }
-}
-
-@Composable
-fun ModeScreen(
-    mode: AuraMode,
-    onMode: (AuraMode) -> Unit,
-    overrides: List<Pair<String, AuraMode?>>,
-    onBack: () -> Unit,
-) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Aura.Bg)
-            .windowInsetsPadding(WindowInsets.systemBars),
-    ) {
-        ScreenHeader("Mode", onBack)
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            ModeOption(
-                title = "Guide me",
-                body = "Points, waits, never taps.",
-                selected = mode == AuraMode.Guide,
-                accent = Aura.Cyan,
-                onClick = { onMode(AuraMode.Guide) },
-            )
-            ModeOption(
-                title = "Do it for me",
-                body = "Taps for you, stops at anything irreversible.",
-                selected = mode == AuraMode.Auto,
-                accent = Aura.Purple,
-                onClick = { onMode(AuraMode.Auto) },
-            )
-
-            if (overrides.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                AuraEyebrow("Override per app", color = Aura.TextMuted)
-                overrides.forEach { (name, appMode) ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Aura.Surface)
-                            .border(1.dp, Aura.Line, RoundedCornerShape(14.dp))
-                            .padding(horizontal = 15.dp, vertical = 13.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Box(
-                            Modifier
-                                .size(28.dp)
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(
-                                    Brush.linearGradient(listOf(Aura.CyanBright, Aura.Purple)),
-                                ),
-                        )
-                        Text(
-                            name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Aura.TextMid,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            appMode?.label ?: "Guide only 🔒",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (appMode == null) Aura.TextGhost else Aura.PurpleLight,
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            AuraNote(
-                "Banking, health and password apps are locked to Guide. That can't be changed.",
-            )
             Spacer(Modifier.height(20.dp))
         }
     }
