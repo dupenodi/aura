@@ -9,7 +9,9 @@ import com.drishti.accessibility.TreeJson
 import com.drishti.overlay.PointerOverlay
 import com.drishti.voice.SpeechOutput
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.JsonObject
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -143,7 +145,17 @@ class ToolExecutor(
         var nudged = false
         var changedPolls = 0
         while (SystemClock.elapsedRealtime() < deadline) {
+            coroutineContext.ensureActive()
             delay(POLL_MS)
+            // Accessibility can be flipped off mid-step — don't sit out the full 30s.
+            if (ScreenAgentAccessibilityService.getInstance() == null) {
+                pointerOverlay.hide()
+                val lost = "I've lost permission to read the screen — turn Aura back on in " +
+                    "Accessibility settings."
+                speechOutput.speak(lost)
+                pointerOverlay.showStatus(lost, SPEAK_HOLD_MS)
+                return Result(false, lost, done = true)
+            }
             val now = TreeJson.signature(service.getVisibleElements())
             // A different app counts on its own only if the screen changed with it.
             // Unqualified, it fires on anything that merely raises a window — the keyboard,

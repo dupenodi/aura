@@ -76,7 +76,17 @@ in code so the behaviour can be re-checked when things change.
 
 | # | Case | What Aura does | Where |
 |---|------|----------------|-------|
-| 37 | User wants to stop mid-session | Tapping the orb stops it — no second overlay is placed over the app they are trying to use | `BubbleService.stopRun`, orb `ACTION_UP` while `running` |
-| 38 | User wonders what is going on | The bubble carries the current instruction and the orb pulses while the session is live | `PointerOverlay.statusListener` → `BubbleService.say`, `OrbView.busy` |
-| 39 | Accessibility service switched off mid-session | Says permission was lost and how to restore it | `runLoop` service null branch |
+| 37 | User wants to stop mid-session | Tap the orb **or** the Stop chip on the helping bubble. Speech stops immediately. Hold-to-talk is disabled while a session is live so long-press can't steal Stop | `BubbleService.stopRun`, `sayHelping` Stop chip, orb `ACTION_UP` while `running`, `AgentOrchestrator.cancel` → `speechOutput.stop` |
+| 37a | User pauses from the notification | "Pause Aura" sets `paused=true` (same as Privacy), stops the current run, and tears down the overlay until they unpause | `ACTION_STOP` in `BubbleService` |
+| 37b | User pauses from Privacy | Overlay service stops immediately; stays off until unpaused | `AuraPrefs.paused` → `observePrefs` / `MainActivity` |
+| 38 | User wonders what is going on | The bubble carries the current instruction (with Stop), and the orb pulses while the session is live | `sayHelping`, `OrbView.busy` |
+| 39 | Accessibility service switched off mid-session | Says permission was lost and how to restore it — checked at each loop turn **and** every poll inside a guide wait | `runLoop` service null branch, `ToolExecutor.guide` mid-wait check |
 | 40 | Routine run again | Runs the saved wording as a fresh session; the counter is bumped | `RoutineStore.recordRun`, `BubbleService.runTask` |
+
+### Stopping — other outs
+
+| # | Case | What Aura does | Where |
+|---|------|----------------|-------|
+| 41 | Stop while an LLM HTTP call is in flight | Coroutine cancel cancels the OkHttp `Call`; router does not fall through to the next provider | `HttpCalls.cancellableCall`, `LlmRouter` rethrows `CancellationException` |
+| 42 | System Back on the Home screen | Cancels the live session (without pausing Aura), then backgrounds the app | `MainActivity` BackHandler → `BubbleService.cancelRun` |
+| 43 | Composer opened from Home mid-run | Current run is stopped first, then the composer opens | `ACTION_COMPOSE` → `stopRun` then `showComposer` |

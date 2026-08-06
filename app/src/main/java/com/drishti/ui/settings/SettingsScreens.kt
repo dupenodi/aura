@@ -76,7 +76,6 @@ fun SettingsScreen(
     orbSkin: OrbSkin,
     glow: GlowLevel,
     speakAloud: Boolean,
-    hideInFullscreen: Boolean,
     permissionsGranted: Boolean,
     onBack: () -> Unit,
     onOpenPresence: () -> Unit,
@@ -85,7 +84,6 @@ fun SettingsScreen(
     onOpenRoutines: () -> Unit,
     language: AuraLanguage,
     onSpeakAloud: (Boolean) -> Unit,
-    onHideInFullscreen: (Boolean) -> Unit,
     onOpenPermissions: () -> Unit,
 ) {
     Column(
@@ -110,16 +108,11 @@ fun SettingsScreen(
                 AuraRow(
                     "Avatar & glow",
                     showChevron = true,
+                    divider = false,
                     onClick = onOpenPresence,
                     trailing = {
                         AuraOrb(size = 22.dp, skin = orbSkin, glow = glow, breathing = false)
                     },
-                )
-                AuraRow(
-                    "Hide in fullscreen apps",
-                    showChevron = false,
-                    divider = false,
-                    trailing = { AuraToggle(hideInFullscreen, onHideInFullscreen) },
                 )
             }
 

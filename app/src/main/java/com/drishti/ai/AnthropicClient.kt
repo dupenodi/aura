@@ -32,7 +32,7 @@ class AnthropicClient(
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    override fun createMessage(
+    override suspend fun createMessage(
         system: String,
         messages: List<ChatModels.Message>,
         tools: List<JsonObject>,
@@ -69,13 +69,13 @@ class AnthropicClient(
             .post(json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON))
             .build()
 
-        http.newCall(request).execute().use { resp ->
+        return http.cancellableCall(request) { resp ->
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 error("Anthropic HTTP ${resp.code}: $raw")
             }
             val parsed = json.decodeFromString(ChatModels.Response.serializer(), raw)
-            return parsed.copy(provider = providerId)
+            parsed.copy(provider = providerId)
         }
     }
 

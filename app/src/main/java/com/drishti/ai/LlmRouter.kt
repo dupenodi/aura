@@ -3,6 +3,7 @@ package com.drishti.ai
 import android.util.Log
 import com.drishti.BuildConfig
 import kotlinx.serialization.json.JsonObject
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Routes chat requests across providers.
@@ -18,7 +19,7 @@ class LlmRouter(
 
     private val backends: List<ChatBackend> by lazy { buildBackends() }
 
-    override fun createMessage(
+    override suspend fun createMessage(
         system: String,
         messages: List<ChatModels.Message>,
         tools: List<JsonObject>,
@@ -34,6 +35,8 @@ class LlmRouter(
             try {
                 Log.i(TAG, "Trying provider=${backend.providerId}")
                 return backend.createMessage(system, messages, tools, maxTokens)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Provider ${backend.providerId} failed: ${e.message}")
                 lastError = e

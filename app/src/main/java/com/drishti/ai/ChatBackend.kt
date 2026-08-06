@@ -46,7 +46,7 @@ object ChatModels {
 
 interface ChatBackend {
     val providerId: String
-    fun createMessage(
+    suspend fun createMessage(
         system: String,
         messages: List<ChatModels.Message>,
         tools: List<JsonObject>,

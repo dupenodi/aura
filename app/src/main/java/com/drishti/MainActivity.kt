@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -53,6 +54,10 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { /* re-read on resume */ }
 
+    private val notificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* optional — orb still works without the Pause action */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = AuraPrefs.get(this)
@@ -77,7 +82,6 @@ class MainActivity : ComponentActivity() {
                 val orbSkin by prefs.orbSkin.collectAsState()
                 val glow by prefs.glow.collectAsState()
                 val speakAloud by prefs.speakAloud.collectAsState()
-                val hideInFullscreen by prefs.hideInFullscreen.collectAsState()
                 val paused by prefs.paused.collectAsState()
                 val records by history.records.collectAsState()
                 val routines by routineStore.routines.collectAsState()
@@ -90,6 +94,7 @@ class MainActivity : ComponentActivity() {
                 // Once set up and permitted, the orb should simply be there.
                 LaunchedEffect(onboarded, permissions, paused) {
                     if (onboarded && permissions.accessibility && permissions.overlay && !paused) {
+                        ensureNotificationPermission()
                         BubbleService.start(this@MainActivity)
                     } else if (paused) {
                         BubbleService.stop(this@MainActivity)
@@ -105,15 +110,20 @@ class MainActivity : ComponentActivity() {
                         onGlow = prefs::setGlow,
                         onRequestAccessibility = { openAccessibilitySettings() },
                         onRequestOverlay = { openOverlaySettings() },
-                        onRequestMic = { micPermission.launch(Manifest.permission.RECORD_AUDIO) },
                         onFinish = { firstTask ->
                             prefs.onboardingComplete = true
                             onboarded = true
-                            BubbleService.start(this@MainActivity)
-                            if (firstTask != null) {
-                                BubbleService.runTask(this@MainActivity, firstTask)
-                                // Onboarding ends outside the app, watching the orb work.
-                                moveTaskToBack(true)
+                            // Re-read at call time — the Compose snapshot may still be
+                            // the pre-Settings frame when PermissionGuide completes.
+                            val now = readPermissions()
+                            if (now.accessibility && now.overlay) {
+                                ensureNotificationPermission()
+                                BubbleService.start(this@MainActivity)
+                                if (firstTask != null) {
+                                    BubbleService.runTask(this@MainActivity, firstTask)
+                                    // Onboarding ends outside the app, watching the orb work.
+                                    moveTaskToBack(true)
+                                }
                             }
                         },
                     )
@@ -127,6 +137,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // On Home, Back ends a live session then backgrounds the app — same
+                // out-of-band escape as notification Pause, without flipping paused.
+                BackHandler(enabled = route == Route.Home) {
+                    BubbleService.cancelRun(this@MainActivity)
+                    moveTaskToBack(true)
+                }
+
                 when (route) {
                     Route.Home -> HomeScreen(
                         records = records,
@@ -135,7 +152,10 @@ class MainActivity : ComponentActivity() {
                         active = !paused && permissions.accessibility && permissions.overlay,
                         onOpenSettings = { route = Route.Settings },
                         onAsk = {
+                            if (paused) return@HomeScreen
+                            ensureNotificationPermission()
                             BubbleService.start(this@MainActivity)
+                            // openComposer cancels any in-flight run first.
                             BubbleService.openComposer(this@MainActivity)
                             moveTaskToBack(true)
                         },
@@ -145,7 +165,6 @@ class MainActivity : ComponentActivity() {
                         orbSkin = orbSkin,
                         glow = glow,
                         speakAloud = speakAloud,
-                        hideInFullscreen = hideInFullscreen,
                         permissionsGranted = permissions.accessibility && permissions.overlay,
                         onBack = { route = Route.Home },
                         onOpenPresence = { route = Route.Presence },
@@ -154,7 +173,6 @@ class MainActivity : ComponentActivity() {
                         onOpenRoutines = { route = Route.Routines },
                         language = language,
                         onSpeakAloud = prefs::setSpeakAloud,
-                        onHideInFullscreen = prefs::setHideInFullscreen,
                         onOpenPermissions = { openAccessibilitySettings() },
                     )
 
@@ -179,7 +197,9 @@ class MainActivity : ComponentActivity() {
                     Route.Routines -> RoutinesScreen(
                         routines = routines,
                         onRun = { routine ->
+                            if (paused) return@RoutinesScreen
                             routineStore.recordRun(routine.id)
+                            ensureNotificationPermission()
                             BubbleService.start(this@MainActivity)
                             BubbleService.runTask(this@MainActivity, routine.task)
                             moveTaskToBack(true)
@@ -212,12 +232,25 @@ class MainActivity : ComponentActivity() {
      * the user watches the orb work rather than staring at our app.
      */
     private fun handleTaskHandoff(intent: Intent?) {
+        val prefs = AuraPrefs.get(this)
         val task = intent?.getStringExtra(EXTRA_TASK)?.trim().orEmpty()
-        if (task.isEmpty() || !AuraPrefs.get(this).onboardingComplete) return
+        if (task.isEmpty() || !prefs.onboardingComplete || prefs.paused.value) return
         intent?.removeExtra(EXTRA_TASK)
+        ensureNotificationPermission()
         BubbleService.start(this)
         BubbleService.runTask(this, task)
         moveTaskToBack(true)
+    }
+
+    /** So the Pause Aura notification action is visible on Android 13+. */
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun readPermissions() = PermissionState(

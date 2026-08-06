@@ -91,13 +91,13 @@ fun HomeScreen(
                 .clip(RoundedCornerShape(15.dp))
                 .background(Aura.SurfaceRaised)
                 .border(1.dp, Aura.LineBright, RoundedCornerShape(15.dp))
-                .clickable(onClick = onAsk)
+                .clickable(enabled = active, onClick = onAsk)
                 .padding(horizontal = 16.dp, vertical = 15.dp),
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("◉", color = Aura.TextGhost, style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    "Ask, or hold the orb anywhere",
+                    if (active) "Ask, or hold the orb anywhere" else "Paused — unpause in Privacy",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Aura.TextGhost,
                 )

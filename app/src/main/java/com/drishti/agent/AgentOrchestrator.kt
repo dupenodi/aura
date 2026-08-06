@@ -50,8 +50,10 @@ class AgentOrchestrator(
 
     fun cancel() {
         job?.cancel()
+        speechOutput.stop()
         pointerOverlay.hide()
-        pointerOverlay.showStatus("Stopped")
+        // BubbleService owns the "Stopped." bubble — don't flash status here and
+        // have the CancellationException path clear it a moment later.
     }
 
     fun runTask(task: String) {
@@ -69,7 +71,8 @@ class AgentOrchestrator(
                 outcome = runLoop(task)
             } catch (e: CancellationException) {
                 outcome = Outcome(TaskOutcome.Cancelled, null, stepsTaken)
-                pointerOverlay.hide()
+                speechOutput.stop()
+                // Pointer already hidden by cancel(); leave the bubble to BubbleService.
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Agent failed", e)
@@ -170,14 +173,13 @@ class AgentOrchestrator(
             )
 
             val response = try {
-                withContext(Dispatchers.IO) {
-                    client.createMessage(
-                        system = SystemPrompt.TEXT,
-                        messages = messages,
-                        tools = ToolDefinitions.tools,
-                        maxTokens = com.drishti.BuildConfig.LLM_MAX_TOKENS,
-                    )
-                }
+                // createMessage is cancellable (OkHttp Call.cancel on coroutine cancel).
+                client.createMessage(
+                    system = SystemPrompt.TEXT,
+                    messages = messages,
+                    tools = ToolDefinitions.tools,
+                    maxTokens = com.drishti.BuildConfig.LLM_MAX_TOKENS,
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

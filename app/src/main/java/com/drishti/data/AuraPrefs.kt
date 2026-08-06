@@ -30,9 +30,6 @@ class AuraPrefs private constructor(context: Context) {
     private val _speakAloud = MutableStateFlow(prefs.getBoolean(KEY_SPEAK, true))
     val speakAloud: StateFlow<Boolean> = _speakAloud
 
-    private val _hideInFullscreen = MutableStateFlow(prefs.getBoolean(KEY_HIDE_FULLSCREEN, true))
-    val hideInFullscreen: StateFlow<Boolean> = _hideInFullscreen
-
     private val _paused = MutableStateFlow(prefs.getBoolean(KEY_PAUSED, false))
     val paused: StateFlow<Boolean> = _paused
 
@@ -71,11 +68,6 @@ class AuraPrefs private constructor(context: Context) {
         _speakAloud.value = enabled
     }
 
-    fun setHideInFullscreen(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_HIDE_FULLSCREEN, enabled).apply()
-        _hideInFullscreen.value = enabled
-    }
-
     fun setPaused(paused: Boolean) {
         prefs.edit().putBoolean(KEY_PAUSED, paused).apply()
         _paused.value = paused
@@ -95,7 +87,6 @@ class AuraPrefs private constructor(context: Context) {
         private const val KEY_ORB = "orb_skin"
         private const val KEY_GLOW = "glow"
         private const val KEY_SPEAK = "speak_aloud"
-        private const val KEY_HIDE_FULLSCREEN = "hide_fullscreen"
         private const val KEY_PAUSED = "paused"
         private const val KEY_ONBOARDED = "onboarded"
         private const val KEY_ORB_X = "orb_x"

@@ -39,7 +39,7 @@ class OpenAiCompatibleClient(
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    override fun createMessage(
+    override suspend fun createMessage(
         system: String,
         messages: List<ChatModels.Message>,
         tools: List<JsonObject>,
@@ -108,12 +108,12 @@ class OpenAiCompatibleClient(
         }
         extraHeaders.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
 
-        http.newCall(requestBuilder.build()).execute().use { resp ->
+        return http.cancellableCall(requestBuilder.build()) { resp ->
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 error("$providerId HTTP ${resp.code}: $raw")
             }
-            return parseResponse(raw)
+            parseResponse(raw)
         }
     }
 

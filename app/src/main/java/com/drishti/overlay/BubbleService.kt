@@ -29,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.drishti.MainActivity
 import com.drishti.R
 import com.drishti.agent.AgentOrchestrator
@@ -39,7 +40,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * The floating orb and everything it says.
@@ -79,6 +79,9 @@ class BubbleService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val speech by lazy { com.drishti.voice.SpeechOutput(this) }
 
+    /** Cleared on destroy so a pending long-press can't fire after teardown. */
+    private var beginHoldRunnable: Runnable? = null
+
     /** Battery saver degrades the glow before it degrades the help. */
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) = refreshPowerState()
@@ -91,7 +94,14 @@ class BubbleService : Service() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = AuraPrefs.get(this)
         pointerOverlay = PointerOverlay(this)
-        pointerOverlay.statusListener = { text, duration -> say(text, duration) }
+        // Status lines during a run carry a Stop chip so stop isn't only "know to tap".
+        pointerOverlay.statusListener = { text, duration ->
+            if (running && text.isNotBlank()) {
+                sayHelping(text, duration)
+            } else {
+                say(text, duration)
+            }
+        }
         orchestrator = AgentOrchestrator(
             appContext = applicationContext,
             pointerOverlay = pointerOverlay,
@@ -104,8 +114,13 @@ class BubbleService : Service() {
             }
         }
 
+        // Required within the FGS start timeout even if we immediately stopSelf.
         startAsForeground()
 
+        if (prefs.paused.value) {
+            stopSelf()
+            return
+        }
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Aura needs permission to draw over apps", Toast.LENGTH_LONG).show()
             stopSelf()
@@ -113,28 +128,56 @@ class BubbleService : Service() {
         }
         showOrb()
         observePrefs()
-        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        ContextCompat.registerReceiver(
+            this,
+            batteryReceiver,
+            IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         refreshPowerState()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // Match Privacy → Pause: hide the orb and stay paused until they unpause.
+                prefs.setPaused(true)
+                if (running) stopRun()
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_COMPOSE -> mainHandler.post { showComposer() }
-            ACTION_RUN_TASK -> intent.getStringExtra(EXTRA_TASK)?.let { task ->
-                mainHandler.post { startTask(task) }
+            ACTION_CANCEL_RUN -> mainHandler.post {
+                if (running) stopRun()
             }
-            ACTION_SHOW -> if (orbView == null && Settings.canDrawOverlays(this)) showOrb()
+            ACTION_COMPOSE -> mainHandler.post {
+                if (!isOperable()) return@post
+                // Asking mid-run replaces the session — stop first so Stop isn't orphaned.
+                if (running) stopRun()
+                showComposer()
+            }
+            ACTION_RUN_TASK -> intent.getStringExtra(EXTRA_TASK)?.let { task ->
+                mainHandler.post {
+                    if (isOperable()) startTask(task)
+                }
+            }
+            ACTION_SHOW -> mainHandler.post {
+                if (isOperable() && orbView == null) showOrb()
+            }
         }
         return START_STICKY
     }
 
+    /** Paused or missing overlay — refuse to show UI or start work. */
+    private fun isOperable(): Boolean =
+        !prefs.paused.value && Settings.canDrawOverlays(this)
+
     override fun onDestroy() {
+        beginHoldRunnable?.let { mainHandler.removeCallbacks(it) }
+        beginHoldRunnable = null
         hideComposer()
+        // Tear down voice quietly — don't post a bubble update after the window is gone.
         voice?.cancel()
+        listening = false
         speech.shutdown()
         removeBubble()
         orbView?.let { runCatching { wm.removeView(it) } }
@@ -193,7 +236,7 @@ class BubbleService : Service() {
             .setContentText(getString(R.string.overlay_notification_text))
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentIntent(open)
-            .addAction(0, "Pause", stop)
+            .addAction(0, "Pause Aura", stop)
             .setOngoing(true)
             .build()
 
@@ -234,11 +277,13 @@ class BubbleService : Service() {
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
         val holdTimeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
 
+        beginHoldRunnable?.let { mainHandler.removeCallbacks(it) }
         val beginHold = Runnable {
             holding = true
             view.animate().scaleX(1.06f).scaleY(1.06f).setDuration(120).start()
             beginListening()
         }
+        beginHoldRunnable = beginHold
 
         view.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -249,7 +294,10 @@ class BubbleService : Service() {
                     startY = params.y
                     moved = false
                     holding = false
-                    mainHandler.postDelayed(beginHold, holdTimeout)
+                    // Mid-session the orb is Stop — don't let long-press steal it for voice.
+                    if (!running) {
+                        mainHandler.postDelayed(beginHold, holdTimeout)
+                    }
                     view.animate().scaleX(0.92f).scaleY(0.92f).setDuration(110).start()
                     true
                 }
@@ -258,11 +306,14 @@ class BubbleService : Service() {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
                     val past = kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop
-                    // While recording, small movement is just an unsteady hand — only
-                    // treat it as a drag if they haven't started talking.
-                    if (!moved && past && !holding) {
+                    if (!moved && past) {
                         moved = true
                         mainHandler.removeCallbacks(beginHold)
+                        // Drag after hold cancels the recording — don't send a half-said ask.
+                        if (holding) {
+                            holding = false
+                            cancelListening()
+                        }
                     }
                     if (moved) {
                         params.x = (startX + dx).coerceIn(0, (screenWidth() - size).coerceAtLeast(0))
@@ -293,7 +344,10 @@ class BubbleService : Service() {
                 MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(beginHold)
                     view.animate().scaleX(1f).scaleY(1f).setDuration(130).start()
-                    if (holding) cancelListening()
+                    if (holding) {
+                        holding = false
+                        cancelListening()
+                    }
                     true
                 }
 
@@ -301,7 +355,9 @@ class BubbleService : Service() {
             }
         }
 
-        runCatching { wm.addView(view, params) }
+        // Only keep the reference if the window actually attached — otherwise a failed
+        // addView would permanently block retries (orbView != null).
+        if (runCatching { wm.addView(view, params) }.isFailure) return
         orbView = view
         orbParams = params
     }
@@ -437,6 +493,7 @@ class BubbleService : Service() {
      * actually opens — an overlay window that cannot be typed into is worse than none.
      */
     private fun showComposer() {
+        if (!isOperable()) return
         if (composerView != null) {
             hideComposer()
             return
@@ -584,8 +641,12 @@ class BubbleService : Service() {
     }
 
     private fun startTask(task: String) {
+        if (!isOperable()) return
         hideComposer()
-        say("Working on it — tap me to stop", 2500)
+        // Optimistic so a quick tap stops even before the agent job posts running=true.
+        running = true
+        orbView?.busy = true
+        sayHelping("Working on it — tap me to stop", 5000)
         orchestrator.runTask(task)
     }
 
@@ -593,12 +654,23 @@ class BubbleService : Service() {
         orchestrator.cancel()
         running = false
         orbView?.busy = false
+        speech.stop()
         say("Stopped.", 2500)
     }
 
     // ---- Speech bubble ----------------------------------------------------------
 
     private fun say(text: String, durationMs: Long) = say(text, durationMs, null, emptyList())
+
+    /** Instruction / status while a session is live — always offers Stop. */
+    private fun sayHelping(text: String, durationMs: Long) {
+        say(
+            text = text,
+            durationMs = durationMs,
+            tag = "helping",
+            chips = listOf(BubbleChip("Stop", primary = true) { stopRun() }),
+        )
+    }
 
     /**
      * Shows a single sentence anchored to the orb. Bubbles never stack: a new message
@@ -646,6 +718,10 @@ class BubbleService : Service() {
             card.alpha = 0f
             repositionBubble()
             animateBubbleIn()
+
+            // Chips (e.g. Stop) and the listening transcript stay until replaced —
+            // auto-hiding would drop Stop mid-guide or vanish while still holding.
+            if (chips.isNotEmpty() || tag == "listening") return@post
 
             val readable = 1400L + text.length * 45L
             val hide = Runnable { fadeOutBubble() }
@@ -756,29 +832,45 @@ class BubbleService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.drishti.overlay.STOP"
+        const val ACTION_CANCEL_RUN = "com.drishti.overlay.CANCEL_RUN"
         const val ACTION_SHOW = "com.drishti.overlay.SHOW"
         const val ACTION_COMPOSE = "com.drishti.overlay.COMPOSE"
         const val ACTION_RUN_TASK = "com.drishti.overlay.RUN_TASK"
         private const val EXTRA_TASK = "task"
         private const val NOTIF_ID = 42
 
-        fun start(context: Context) = send(context, Intent(context, BubbleService::class.java).setAction(ACTION_SHOW))
-
-        fun stop(context: Context) {
-            context.startService(
-                Intent(context, BubbleService::class.java).setAction(ACTION_STOP),
-            )
+        fun start(context: Context) {
+            if (AuraPrefs.get(context).paused.value) return
+            send(context, Intent(context, BubbleService::class.java).setAction(ACTION_SHOW))
         }
 
-        fun openComposer(context: Context) =
-            send(context, Intent(context, BubbleService::class.java).setAction(ACTION_COMPOSE))
+        /**
+         * Pause Aura: set the pref and tear down without recreating the service
+         * just to deliver an intent (which used to flash the orb/notif).
+         */
+        fun stop(context: Context) {
+            AuraPrefs.get(context).setPaused(true)
+            context.stopService(Intent(context, BubbleService::class.java))
+        }
 
-        fun runTask(context: Context, task: String) = send(
-            context,
-            Intent(context, BubbleService::class.java)
-                .setAction(ACTION_RUN_TASK)
-                .putExtra(EXTRA_TASK, task),
-        )
+        /** Stops the current guided session without pausing Aura globally. */
+        fun cancelRun(context: Context) =
+            send(context, Intent(context, BubbleService::class.java).setAction(ACTION_CANCEL_RUN))
+
+        fun openComposer(context: Context) {
+            if (AuraPrefs.get(context).paused.value) return
+            send(context, Intent(context, BubbleService::class.java).setAction(ACTION_COMPOSE))
+        }
+
+        fun runTask(context: Context, task: String) {
+            if (AuraPrefs.get(context).paused.value) return
+            send(
+                context,
+                Intent(context, BubbleService::class.java)
+                    .setAction(ACTION_RUN_TASK)
+                    .putExtra(EXTRA_TASK, task),
+            )
+        }
 
         private fun send(context: Context, intent: Intent) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
