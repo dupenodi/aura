@@ -2,6 +2,9 @@
 
 On-device Android screen assistant POC. Aura **shows** the user how to do things: it reads the accessibility tree (indexing ported in-process from [mobilerun-portal](https://github.com/droidrun/mobilerun-portal) — **not** a droidrun dependency), and an LLM loop picks the single next step, moves a cursor onto it, and waits for the user's own finger. It never taps, types or swipes for them.
 
+<img width="240" height="533" alt="Aura-ezgif com-resize" src="https://github.com/user-attachments/assets/f8063d08-7c12-4d2d-a8c0-5513c7bb4664" />
+
+
 > **POC only.** API keys live on-device (`local.properties` → BuildConfig, optional EncryptedSharedPreferences). Move keys behind a backend proxy before any real distribution.
 
 ## LLM providers
