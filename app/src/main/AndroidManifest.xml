@@ -44,6 +44,23 @@
             </intent-filter>
         </activity>
 
+        <!-- Lets aura be chosen as the phone's digital assistant (Settings → apps → default
+             apps → digital assistant app): hold power or swipe from a bottom corner. -->
+        <activity
+            android:name=".AssistActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:label="@string/app_name"
+            android:theme="@style/Theme.Aura.Assist">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".accessibility.ScreenAgentAccessibilityService"
             android:exported="true"

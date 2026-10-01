@@ -14,16 +14,17 @@ import androidx.core.content.ContextCompat
 /**
  * A hold-to-talk recording session.
  *
- * The design is "hold the orb and talk, release to send", which the one-shot recogniser
+ * The design is "hold the handle and talk, release to send", which the one-shot recogniser
  * couldn't express: it had no way to be stopped and no partial text to show. This wraps
  * the recogniser so the caller can start on press, stream the live transcript into the
- * bubble, and finish the moment the finger lifts.
+ * dock, and finish the moment the finger lifts.
  */
 class VoiceSession(private val context: Context) : HoldToTalk {
 
     private var recognizer: SpeechRecognizer? = null
     private var finished = false
 
+    private var onLevel: ((Float) -> Unit)? = null
     private var onPartial: ((String) -> Unit)? = null
     private var onFinal: ((String, String?) -> Unit)? = null
     private var onFailure: ((HoldToTalk.Failure) -> Unit)? = null
@@ -44,7 +45,11 @@ class VoiceSession(private val context: Context) : HoldToTalk {
         onPartial: (String) -> Unit,
         onFinal: (text: String, languageTag: String?) -> Unit,
         onFailure: (HoldToTalk.Failure) -> Unit,
+        handsFree: Boolean,
+        onLevel: (Float) -> Unit,
     ) {
+        // The platform recogniser ends on silence by itself, so hands-free needs nothing extra.
+        this.onLevel = onLevel
         this.onPartial = onPartial
         this.onFinal = onFinal
         this.onFailure = onFailure
@@ -67,7 +72,9 @@ class VoiceSession(private val context: Context) : HoldToTalk {
         engine.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) = Unit
             override fun onBeginningOfSpeech() = Unit
-            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onRmsChanged(rmsdB: Float) {
+                this@VoiceSession.onLevel?.invoke(((rmsdB + 2f) / 12f).coerceIn(0f, 1f))
+            }
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEndOfSpeech() = Unit
 

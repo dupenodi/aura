@@ -12,10 +12,15 @@ testing came first, so the work went 0 → 2 → 3 with Phase 1's simulator buil
   bulbul:v3 streaming TTS wired into the app; simulated Pixel + 20 golden tasks + fuzzing;
   live eval runner; session recorder; CI workflow; accessibility service rewritten (no more
   250 ms main-thread polling).
+- UI: Geist + lowercase design system; onboarding with all three permissions; one-page
+  settings. The floating orb is gone: an edge **handle** (tap to type, hold to talk, drag
+  along the edge), an **edge glow** in the aura colours while it listens / works / guides,
+  and an **instruction dock** above the navigation bar that moves up when the target is at
+  the bottom. Aura can be the phone's digital assistant (hold power, corner swipe) and then
+  listens hands-free with an energy endpointer.
 - Not yet verified on a device: everything in `:app` compiles against the Android 15
   framework, but has not run on a phone. The first real-device pass is the next step.
-- Still open: Phase 4 UI work (contrast, light theme, localisation, onboarding for restricted
-  settings and OEM battery killers), keys behind a server, real-device recordings as eval
+- Still open: rest of Phase 4 (light theme, localisation, OEM battery killers), keys behind a server, real-device recordings as eval
   fixtures.
 
 ---

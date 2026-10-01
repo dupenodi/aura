@@ -67,7 +67,7 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
         /**
          * Whether an event says anything about which app is in front.
          *
-         * Our own package never does: the orb and the highlight are our windows, and they
+         * Our own package never does: the handle, glow, dock and ring are our windows, and they
          * raise events like anything else. Nor does a content change — the status bar clock
          * ticking over is not the user going somewhere.
          */
@@ -114,7 +114,7 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val pkg = event.packageName?.toString().orEmpty()
-        // Our own windows (orb, bubble, ring) are never the user doing something.
+        // Our own windows (handle, glow, dock, ring) are never the user doing something.
         if (pkg == packageName) return
 
         if (isForegroundPackageSignal(pkg, event.eventType, packageName)) {
@@ -325,7 +325,7 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
 
     /**
      * A downscaled JPEG of the app the user is in, for screens the tree can't describe.
-     * On Android 14+ only that app's window is captured, so Aura's own orb and ring never
+     * On Android 14+ only that app's window is captured, so Aura's own glow, dock and ring never
      * appear in the picture the model sees.
      */
     suspend fun screenshot(): Screenshot? {

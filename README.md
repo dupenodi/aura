@@ -33,7 +33,7 @@ other apps, and the microphone.
 :app   (Android)
   accessibility/  event stream + on-demand snapshots + screenshots, read-only
   agent/          GuideRunner, AndroidDevice
-  overlay/        the aura glow, speech bubble, ring/cursor/swipe hint
+  overlay/        edge handle, edge glow, instruction dock, ring/swipe hint
   ui/             onboarding, home, settings (Compose, Geist, lowercase)
   voice/          AuraVoice (Sarvam → on-device TTS), hold-to-talk (Sarvam realtime → REST → on-device)
 ```

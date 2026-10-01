@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * Backed by plain SharedPreferences and exposed as StateFlows so both Compose
  * screens and the overlay service observe the same source of truth — a change in
- * Settings takes effect on the floating orb immediately.
+ * Settings takes effect on the overlay immediately.
  */
 class AuraPrefs private constructor(context: Context) {
 
@@ -61,7 +61,7 @@ class AuraPrefs private constructor(context: Context) {
     private val _useScreenshots = MutableStateFlow(prefs.getBoolean(KEY_SCREENSHOTS, true))
     val useScreenshots: StateFlow<Boolean> = _useScreenshots
 
-    /** Where the user last parked the orb; -1 means "never moved it". */
+    /** Where the user last left the edge handle (x: which side; y: height); -1 means "never moved it". */
     var orbX: Int
         get() = prefs.getInt(KEY_ORB_X, -1)
         set(value) = prefs.edit().putInt(KEY_ORB_X, value).apply()

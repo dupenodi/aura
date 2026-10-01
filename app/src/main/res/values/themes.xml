@@ -6,4 +6,15 @@
         <item name="android:statusBarColor">@color/aura_bg</item>
         <item name="android:navigationBarColor">@color/aura_bg</item>
     </style>
+
+    <!-- The assistant entry point shows nothing of its own; the overlay does the talking. -->
+    <style name="Theme.Aura.Assist" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

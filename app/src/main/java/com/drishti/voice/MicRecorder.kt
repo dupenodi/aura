@@ -17,7 +17,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * users often hold the phone at arm's length, in a noisy room.
  */
 class MicRecorder(private val sampleRate: Int = 16_000) {
-    private val running = AtomicBoolean(false)
+    /** Set by [stop]; cleared by [arm] before a recording starts, so an early stop isn't lost. */
+    private val stopRequested = AtomicBoolean(false)
+
+    /** Call on the caller's thread before [record] starts on another. */
+    fun arm() {
+        stopRequested.set(false)
+    }
 
     /**
      * Blocks, calling [onChunk] for each 100 ms of audio, until [stop] or [maxMs].
@@ -47,13 +53,12 @@ class MicRecorder(private val sampleRate: Int = 16_000) {
         )
         effects.forEach { runCatching { it.enabled = true } }
 
-        running.set(true)
         val maxBytes = sampleRate * 2L * maxMs / 1000
         var total = 0L
         try {
             record.startRecording()
             val buf = ByteArray(chunkBytes)
-            while (running.get() && total < maxBytes) {
+            while (!stopRequested.get() && total < maxBytes) {
                 val n = record.read(buf, 0, buf.size)
                 if (n < 0) break
                 if (n > 0) {
@@ -65,13 +70,12 @@ class MicRecorder(private val sampleRate: Int = 16_000) {
             runCatching { record.stop() }
             effects.forEach { runCatching { it.release() } }
             record.release()
-            running.set(false)
         }
         return true
     }
 
     fun stop() {
-        running.set(false)
+        stopRequested.set(true)
     }
 
     companion object {

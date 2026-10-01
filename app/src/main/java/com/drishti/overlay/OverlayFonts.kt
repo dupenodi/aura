@@ -7,7 +7,7 @@ import com.drishti.R
 
 /**
  * Geist for the overlay's plain Android views (Compose reads the font resources directly).
- * Loaded once and cached: the bubble is rebuilt on every message.
+ * Loaded once and cached: the dock is rebound on every message.
  */
 object OverlayFonts {
 

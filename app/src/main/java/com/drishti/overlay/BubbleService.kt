@@ -11,8 +11,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -48,10 +50,17 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * The floating orb and everything it says.
+ * Aura's presence over other apps, and everything it says.
  *
- * Interaction model from the design: tap to type, hold to talk, drag to move. The orb
- * parks at a screen edge, and any bubble anchors to whichever side it is resting on.
+ * Three pieces, none of which covers the app being used:
+ * - the **handle**, a sliver of aura light against the screen edge: tap to type, hold to
+ *   talk, drag along the edge to move it. Mid-session a tap stops;
+ * - the **edge glow**, light around the whole screen while aura listens, works or guides;
+ * - the **dock**, one wide card above the navigation bar carrying the current instruction.
+ *   It moves to the top when the control it points at is down there.
+ *
+ * Aura can also be summoned as the phone's assistant (hold power, or swipe up from a bottom
+ * corner): it listens hands-free and sends when they pause.
  */
 class BubbleService : Service() {
 
@@ -63,27 +72,45 @@ class BubbleService : Service() {
 
     private lateinit var wm: WindowManager
     private lateinit var prefs: AuraPrefs
-    private lateinit var pointerOverlay: PointerOverlay
     private lateinit var runner: GuideRunner
     private lateinit var voiceOut: AuraVoice
+    private lateinit var glow: GlowWindow
 
-    private var orbView: OrbView? = null
-    private var orbParams: WindowManager.LayoutParams? = null
+    private var handleView: EdgeHandleView? = null
+    private var handleParams: WindowManager.LayoutParams? = null
+    private var handleOnRight = true
     private var composerView: View? = null
 
     private var voice: HoldToTalk? = null
-    private var bubbleView: BubbleCardView? = null
-    private var bubbleParams: WindowManager.LayoutParams? = null
-    private var bubbleHide: Runnable? = null
-    private var bubbleAnimator: ValueAnimator? = null
+    private var dockView: DockView? = null
+    private var dockParams: WindowManager.LayoutParams? = null
+    private var dockHide: Runnable? = null
+    private var dockAnimator: ValueAnimator? = null
 
-    private var orbX = 0
-    private var orbY = 0
+    /** The ringed target, in screen pixels: the dock keeps out of its way. */
+    private var dockAvoid: Rect? = null
 
-    /** True while a guidance session is on, which turns the orb into a Stop control. */
+    /** True while a guidance session is on, which turns a tap on the handle into Stop. */
     private var running = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * The ring and swipe hint. Made through the accessibility service when it is on, so it
+     * doesn't count against the touch-through opacity limit (see [OverlayHost]).
+     */
+    private var pointerOverlay: PointerOverlay? = null
+    private var pointerHost: Context? = null
+
+    private fun pointer(): PointerOverlay {
+        val host = OverlayHost.pick(this)
+        pointerOverlay?.let { if (pointerHost === host) return it }
+        pointerOverlay?.detach()
+        return PointerOverlay(host).also {
+            pointerOverlay = it
+            pointerHost = host
+        }
+    }
 
     /**
      * What a guided session shows. Every call can come from a background coroutine, so each
@@ -92,36 +119,45 @@ class BubbleService : Service() {
     private val guideUi = object : GuideUi {
         override fun thinking(text: String?) = mainHandler.post {
             if (!running) return@post
-            sayHelping(text ?: "\u2026", 0)
+            glow.mode = EdgeGlowView.Mode.Working
+            sayHelping(text ?: "…", 0)
         }.let { }
 
         override fun show(step: ShownStep) = mainHandler.post {
             if (!running) return@post
             val bounds = step.bounds
+            // The dock carries the words; the ring only has to say where.
+            dockAvoid = null
             when {
-                bounds != null -> pointerOverlay.showTargetAt(
-                    android.graphics.Rect(bounds.l, bounds.t, bounds.r, bounds.b),
-                    null,
-                    step.instruction,
-                )
+                bounds != null -> {
+                    val rect = Rect(bounds.l, bounds.t, bounds.r, bounds.b)
+                    dockAvoid = rect
+                    pointer().showTargetAt(rect, null, null)
+                }
                 // To see more below, the finger moves up the screen.
-                step.action == Action.Scroll -> pointerOverlay.showSwipe(up = step.direction != Direction.Up, label = step.instruction)
-                else -> pointerOverlay.hide()
+                step.action == Action.Scroll -> pointer().showSwipe(up = step.direction != Direction.Up, label = null)
+                else -> pointer().hide()
             }
+            glow.mode = EdgeGlowView.Mode.Guiding
             val line = if (step.action == Action.Type && !step.text.isNullOrBlank()) {
-                "${step.instruction}\n\u201C${step.text}\u201D"
+                "${step.instruction}\n“${step.text}”"
             } else {
                 step.instruction
             }
             sayHelping(line, 0)
         }.let { }
 
-        override fun emphasize() = pointerOverlay.emphasize()
+        override fun emphasize() = mainHandler.post { pointer().emphasize() }.let { }
 
-        override fun hide() = pointerOverlay.hide()
+        override fun hide() = mainHandler.post {
+            pointer().hide()
+            dockAvoid = null
+        }.let { }
 
         override fun paused(message: String) = mainHandler.post {
-            pointerOverlay.hide()
+            pointer().hide()
+            dockAvoid = null
+            glow.mode = EdgeGlowView.Mode.Guiding
             say(
                 text = message,
                 durationMs = 0,
@@ -134,9 +170,11 @@ class BubbleService : Service() {
         }.let { }
 
         override fun finished(message: String, success: Boolean) = mainHandler.post {
-            pointerOverlay.hide()
+            pointer().hide()
+            dockAvoid = null
             running = false
-            orbView?.busy = false
+            handleView?.busy = false
+            if (!listening) glow.mode = EdgeGlowView.Mode.Off
             if (message.isNotBlank()) say(message, 6000) else say("", 0)
         }.let { }
     }
@@ -155,13 +193,13 @@ class BubbleService : Service() {
         super.onCreate()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = AuraPrefs.get(this)
-        pointerOverlay = PointerOverlay(this)
+        glow = GlowWindow(this)
         voiceOut = AuraVoice(applicationContext)
         runner = GuideRunner(applicationContext, guideUi, voiceOut, agentScope)
         runner.onRunStateChanged = { isRunning ->
             mainHandler.post {
                 running = isRunning
-                orbView?.busy = isRunning
+                handleView?.busy = isRunning
             }
         }
 
@@ -177,7 +215,7 @@ class BubbleService : Service() {
             stopSelf()
             return
         }
-        showOrb()
+        showHandle()
         observePrefs()
         ContextCompat.registerReceiver(
             this,
@@ -191,7 +229,7 @@ class BubbleService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                // Match Privacy → Pause: hide the orb and stay paused until they unpause.
+                // Match Privacy → Pause: hide everything and stay paused until they unpause.
                 prefs.setPaused(true)
                 if (running) stopRun()
                 stopSelf()
@@ -206,13 +244,21 @@ class BubbleService : Service() {
                 if (running) stopRun()
                 showComposer()
             }
+            ACTION_LISTEN -> mainHandler.post {
+                if (!isOperable()) return@post
+                if (handleView == null) showHandle()
+                if (listening) return@post
+                if (running) stopRun()
+                hideComposer()
+                beginListening(handsFree = true)
+            }
             ACTION_RUN_TASK -> intent.getStringExtra(EXTRA_TASK)?.let { task ->
                 mainHandler.post {
                     if (isOperable()) startTask(task)
                 }
             }
             ACTION_SHOW -> mainHandler.post {
-                if (isOperable() && orbView == null) showOrb()
+                if (isOperable() && handleView == null) showHandle()
             }
         }
         return START_STICKY
@@ -222,19 +268,27 @@ class BubbleService : Service() {
     private fun isOperable(): Boolean =
         !prefs.paused.value && Settings.canDrawOverlays(this)
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Rotation or a new display size: keep the handle on its edge and the dock in reach.
+        placeHandle()
+        placeDock()
+    }
+
     override fun onDestroy() {
         beginHoldRunnable?.let { mainHandler.removeCallbacks(it) }
         beginHoldRunnable = null
         hideComposer()
-        // Tear down voice quietly — don't post a bubble update after the window is gone.
+        // Tear down voice quietly — don't post a dock update after the window is gone.
         voice?.cancel()
         listening = false
         runner.cancel()
         voiceOut.shutdown()
-        removeBubble()
-        orbView?.let { runCatching { wm.removeView(it) } }
-        orbView = null
-        pointerOverlay.detach()
+        removeDock()
+        handleView?.let { runCatching { wm.removeView(it) } }
+        handleView = null
+        glow.remove()
+        pointerOverlay?.detach()
         runCatching { unregisterReceiver(batteryReceiver) }
         uiScope.cancel()
         agentScope.cancel()
@@ -251,7 +305,7 @@ class BubbleService : Service() {
     private fun refreshPowerState() {
         val bm = getSystemService(BATTERY_SERVICE) as? BatteryManager ?: return
         val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        orbView?.lowPower = level in 1..15
+        handleView?.lowPower = level in 1..15
     }
 
     private var notification: Notification? = null
@@ -311,32 +365,36 @@ class BubbleService : Service() {
         }
     }
 
-    // ---- The orb ----------------------------------------------------------------
+    // ---- The handle -------------------------------------------------------------
 
-    private fun showOrb() {
-        val size = dp(64)
-        val view = OrbView(this)
+    private fun handleWidth() = dp(28)
+    private fun handleHeight() = dp(112)
 
-        // Return to where the user last parked it; otherwise rest at the right edge,
-        // comfortably above the gesture bar.
-        orbX = prefs.orbX.takeIf { it >= 0 } ?: (screenWidth() - size - dp(14))
-        orbY = prefs.orbY.takeIf { it >= 0 } ?: (screenHeight() * 0.66f).toInt()
-        orbX = orbX.coerceIn(0, (screenWidth() - size).coerceAtLeast(0))
-        orbY = orbY.coerceIn(0, (screenHeight() - size).coerceAtLeast(0))
+    private fun showHandle() {
+        val view = EdgeHandleView(this)
 
-        val params = overlayParams(size, size).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = orbX
-            y = orbY
+        // Return to where the user last left it; otherwise rest on the right edge, a little
+        // below the middle, where a right thumb already is.
+        handleOnRight = prefs.orbX.let { it < 0 || it > screenWidth() / 2 }
+        view.onRight = handleOnRight
+        val params = absoluteParams(handleWidth(), handleHeight()).apply {
+            y = prefs.orbY.takeIf { it >= 0 } ?: (realHeight() * 0.58f).toInt()
+        }
+
+        // On gesture navigation a swipe in from the edge is Back. Keep that gesture off the
+        // handle itself (Android allows up to 200dp of each edge to be excluded).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            view.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                v.systemGestureExclusionRects = listOf(Rect(0, 0, v.width, v.height))
+            }
         }
 
         var downX = 0f
         var downY = 0f
-        var startX = 0
         var startY = 0
         var moved = false
         var holding = false
-        // The platform's own slop and long-press timeout, so the orb feels like every
+        // The platform's own slop and long-press timeout, so the handle feels like every
         // other control on the phone rather than something with its own idea of a press.
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
         val holdTimeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
@@ -344,8 +402,7 @@ class BubbleService : Service() {
         beginHoldRunnable?.let { mainHandler.removeCallbacks(it) }
         val beginHold = Runnable {
             holding = true
-            view.animate().scaleX(1.06f).scaleY(1.06f).setDuration(120).start()
-            beginListening()
+            beginListening(handsFree = false)
         }
         beginHoldRunnable = beginHold
 
@@ -354,15 +411,12 @@ class BubbleService : Service() {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX
                     downY = event.rawY
-                    startX = params.x
                     startY = params.y
                     moved = false
                     holding = false
-                    // Mid-session the orb is Stop — don't let long-press steal it for voice.
-                    if (!running) {
-                        mainHandler.postDelayed(beginHold, holdTimeout)
-                    }
-                    view.animate().scaleX(0.92f).scaleY(0.92f).setDuration(110).start()
+                    view.touched = true
+                    // Mid-session the handle is Stop — don't let long-press steal it for voice.
+                    if (!running) mainHandler.postDelayed(beginHold, holdTimeout)
                     true
                 }
 
@@ -380,28 +434,34 @@ class BubbleService : Service() {
                         }
                     }
                     if (moved) {
-                        params.x = (startX + dx).coerceIn(0, (screenWidth() - size).coerceAtLeast(0))
-                        params.y = (startY + dy).coerceIn(0, (screenHeight() - size).coerceAtLeast(0))
-                        orbX = params.x
-                        orbY = params.y
-                        runCatching { wm.updateViewLayout(view, params) }
-                        repositionBubble()
+                        // Slides along the edge; carried past the middle, it changes sides.
+                        params.y = startY + dy
+                        val right = event.rawX > screenWidth() / 2f
+                        if (right != handleOnRight) {
+                            handleOnRight = right
+                            view.onRight = right
+                        }
+                        placeHandle()
                     }
                     true
                 }
 
                 MotionEvent.ACTION_UP -> {
                     mainHandler.removeCallbacks(beginHold)
-                    view.animate().scaleX(1f).scaleY(1f).setDuration(130).start()
+                    view.touched = false
                     when {
                         holding -> finishListening()
-                        moved -> snapToEdge(view, params, size)
-                        // A paused session picks up again from the orb they were told to tap.
+                        moved -> {
+                            prefs.orbX = if (handleOnRight) screenWidth() else 0
+                            prefs.orbY = params.y
+                        }
+                        // A paused session picks up again from the handle they were told to tap.
                         running && runner.isPaused -> runner.resume()
-                        // Mid-session the orb is the way out. Nothing else may cover the
-                        // app the user is being guided through, and the orb is the one
-                        // control they have already been watching.
+                        // Mid-session the handle is the way out, the one control they have
+                        // been seeing all along. The dock offers stop as well.
                         running -> stopRun()
+                        // Hands-free listening: a tap is "i'm done".
+                        listening -> finishListening()
                         else -> showComposer()
                     }
                     true
@@ -409,7 +469,7 @@ class BubbleService : Service() {
 
                 MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(beginHold)
-                    view.animate().scaleX(1f).scaleY(1f).setDuration(130).start()
+                    view.touched = false
                     if (holding) {
                         holding = false
                         cancelListening()
@@ -422,53 +482,38 @@ class BubbleService : Service() {
         }
 
         // Only keep the reference if the window actually attached — otherwise a failed
-        // addView would permanently block retries (orbView != null).
+        // addView would permanently block retries (handleView != null).
         if (runCatching { wm.addView(view, params) }.isFailure) return
-        orbView = view
-        orbParams = params
+        handleView = view
+        handleParams = params
+        placeHandle()
     }
 
-    /** Settles the orb against the nearer side, the way messenger heads behave. */
-    private fun snapToEdge(view: View, params: WindowManager.LayoutParams, size: Int) {
-        val margin = dp(14)
-        val target = if (params.x + size / 2 < screenWidth() / 2) {
-            margin
-        } else {
-            (screenWidth() - size - margin).coerceAtLeast(margin)
-        }
-        ValueAnimator.ofInt(params.x, target).apply {
-            duration = 240
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { anim ->
-                params.x = anim.animatedValue as Int
-                orbX = params.x
-                if (runCatching { wm.updateViewLayout(view, params) }.isFailure) {
-                    cancel()
-                    return@addUpdateListener
-                }
-                repositionBubble()
-            }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
-                    prefs.orbX = orbX
-                    prefs.orbY = orbY
-                }
-            })
-            start()
-        }
+    /** Flush against its edge, kept clear of the status bar and the navigation bar. */
+    private fun placeHandle() {
+        val view = handleView ?: return
+        val params = handleParams ?: return
+        val h = handleHeight()
+        params.x = if (handleOnRight) screenWidth() - handleWidth() else 0
+        val top = statusBarHeight() + dp(8)
+        val bottom = (realHeight() - navBarHeight() - h - dp(8)).coerceAtLeast(top)
+        params.y = params.y.coerceIn(top, bottom)
+        runCatching { wm.updateViewLayout(view, params) }
     }
 
     // ---- Voice ------------------------------------------------------------------
 
     private var listening = false
+    private var handsFree = false
 
     /**
-     * Press and hold: record while the finger is down, send on release.
+     * Hold the handle: record while the finger is down, send on release. Or [handsFree]
+     * (summoned as the assistant): send when they pause, or when they tap "done".
      *
-     * The transcript streams into the bubble as it is recognised so the user can see it
-     * being heard — the single thing that makes voice input feel trustworthy.
+     * The transcript streams into the dock as it is recognised so they can see it being
+     * heard — the single thing that makes voice input feel trustworthy.
      */
-    private fun beginListening() {
+    private fun beginListening(handsFree: Boolean) {
         if (listening) return
 
         // Sarvam needs our own process to record; if the system won't grant that right now,
@@ -477,25 +522,30 @@ class BubbleService : Service() {
             ?: com.drishti.voice.SpeechProvider.OnDevice
         val session = HoldToTalk.create(this, agentScope, provider) { keyterms() }
         if (!session.hasPermission()) {
+            foregroundForMic(false)
             say("i need the microphone to hear you — opening aura so you can allow it", 5000)
             openMicPermission()
             return
         }
 
         listening = true
+        this.handsFree = handsFree
         voice = session
-        orbView?.listening = true
+        handleView?.listening = true
+        glow.mode = EdgeGlowView.Mode.Listening
+        dockAvoid = null
         voiceOut.stop()
         // Open the model connection while they talk, so the first step isn't waiting on TLS.
         runner.warmUp()
-        say("listening… let go when you're done", 30_000, tag = "listening", chips = emptyList())
+        val prompt = if (handsFree) "listening… ask for anything" else "listening… let go when you're done"
+        say(prompt, 30_000, tag = "listening", chips = listeningChips())
 
         session.start(
             // Null: work the language out from what they say.
             languageTag = if (prefs.autoLanguage.value) null else prefs.language.value.tag,
             onPartial = { partial ->
                 mainHandler.post {
-                    if (listening) say("\u201C$partial\u201D", 30_000, "listening", emptyList())
+                    if (listening) say("“$partial”", 30_000, "listening", listeningChips())
                 }
             },
             onFinal = { text, tag ->
@@ -516,23 +566,39 @@ class BubbleService : Service() {
                             HoldToTalk.Failure.NoPermission ->
                                 "i need the microphone to hear you"
                             HoldToTalk.Failure.Unavailable ->
-                                "voice isn't available on this phone — tap me to type instead"
+                                "voice isn't available on this phone — tap the glow at the edge to type instead"
                             HoldToTalk.Failure.NoSpeech ->
-                                "i didn't catch that — hold me and try again"
+                                if (handsFree) "i didn't hear anything — call me again when you're ready"
+                                else "i didn't catch that — hold the glow at the edge and try again"
                             HoldToTalk.Failure.Error ->
-                                "something went wrong listening — tap me to type instead"
+                                "something went wrong listening — tap the glow at the edge to type instead"
                         },
                         3500,
                     )
                 }
             },
+            handsFree = handsFree,
+            onLevel = { level -> mainHandler.post { if (listening) glow.level(level) } },
         )
     }
 
-    /** Finger lifted: stop recording; the final transcript arrives via the callback. */
+    /** Hands-free there is no finger to lift, so offer the same choices as chips. */
+    private fun listeningChips(): List<BubbleChip> =
+        if (!handsFree) {
+            emptyList()
+        } else {
+            listOf(
+                BubbleChip("done", primary = true) { finishListening() },
+                BubbleChip("cancel", primary = false) { cancelListening() },
+            )
+        }
+
+    /** Finger lifted (or "done"): stop recording; the final transcript arrives via the callback. */
     private fun finishListening() {
         if (!listening) return
-        orbView?.listening = false
+        handleView?.listening = false
+        glow.mode = EdgeGlowView.Mode.Working
+        say("one moment…", 30_000, tag = "helping", chips = emptyList())
         voice?.stop()
     }
 
@@ -545,8 +611,11 @@ class BubbleService : Service() {
 
     private fun endListening() {
         listening = false
+        handsFree = false
         voice = null
-        orbView?.listening = false
+        handleView?.listening = false
+        glow.level(0f)
+        glow.mode = if (running) EdgeGlowView.Mode.Working else EdgeGlowView.Mode.Off
         foregroundForMic(false)
     }
 
@@ -730,20 +799,24 @@ class BubbleService : Service() {
         hideComposer()
         // Optimistic so a quick tap stops even before the agent job posts running=true.
         running = true
-        orbView?.busy = true
-        sayHelping("\u201C${task.trim()}\u201D", 0)
+        handleView?.busy = true
+        glow.mode = EdgeGlowView.Mode.Working
+        sayHelping("“${task.trim()}”", 0)
         runner.runTask(task, spoken)
     }
 
     private fun stopRun() {
         runner.cancel()
         running = false
-        orbView?.busy = false
+        handleView?.busy = false
+        pointerOverlay?.hide()
+        dockAvoid = null
+        if (!listening) glow.mode = EdgeGlowView.Mode.Off
         voiceOut.stop()
         say("stopped", 2000)
     }
 
-    // ---- Speech bubble ----------------------------------------------------------
+    // ---- The dock ---------------------------------------------------------------
 
     private fun say(text: String, durationMs: Long) = say(text, durationMs, null, emptyList())
 
@@ -758,8 +831,8 @@ class BubbleService : Service() {
     }
 
     /**
-     * Shows a single sentence anchored to the orb. Bubbles never stack: a new message
-     * replaces the old one, which is what keeps the overlay from becoming a chat log.
+     * Shows one sentence in the dock. Messages never stack: a new one replaces the old,
+     * which is what keeps the overlay from becoming a chat log.
      */
     private fun say(
         text: String,
@@ -768,27 +841,26 @@ class BubbleService : Service() {
         chips: List<BubbleChip>,
     ) {
         mainHandler.post {
-            bubbleHide?.let { mainHandler.removeCallbacks(it) }
+            dockHide?.let { mainHandler.removeCallbacks(it) }
             if (text.isBlank()) {
-                fadeOutBubble()
+                fadeOutDock()
                 return@post
             }
 
-            val card = bubbleView ?: BubbleCardView(this).also { created ->
-                val params = overlayParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
+            val card = dockView ?: DockView(this).also { created ->
+                val params = absoluteParams(
+                    screenWidth() - dp(DOCK_MARGIN_DP) * 2,
                     WindowManager.LayoutParams.WRAP_CONTENT,
                 ).apply {
-                    gravity = Gravity.TOP or Gravity.START
                     flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 }
                 if (runCatching { wm.addView(created, params) }.isFailure) return@post
-                bubbleView = created
-                bubbleParams = params
+                dockView = created
+                dockParams = params
             }
 
             // Chips need touch; plain messages must not block the app underneath.
-            bubbleParams?.let { params ->
+            dockParams?.let { params ->
                 val notTouchable = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 val want = if (chips.isEmpty()) params.flags or notTouchable
                 else params.flags and notTouchable.inv()
@@ -798,76 +870,70 @@ class BubbleService : Service() {
                 }
             }
 
+            val wasShowing = card.visibility == View.VISIBLE && card.alpha > 0.5f
             card.bind(text, tag, chips)
             card.visibility = View.VISIBLE
-            card.alpha = 0f
-            repositionBubble()
-            animateBubbleIn()
+            placeDock()
+            // Live text (a transcript, the next step) swaps in place; only a fresh dock rises.
+            if (!wasShowing) animateDockIn()
 
             // Chips (e.g. Stop) and the listening transcript stay until replaced —
-            // auto-hiding would drop Stop mid-guide or vanish while still holding.
-            if (chips.isNotEmpty() || tag == "listening") return@post
+            // auto-hiding would drop Stop mid-guide or vanish while still talking.
+            if (chips.isNotEmpty() || tag == "listening" || tag == "helping") return@post
 
             val readable = 1400L + text.length * 45L
-            val hide = Runnable { fadeOutBubble() }
-            bubbleHide = hide
+            val hide = Runnable { fadeOutDock() }
+            dockHide = hide
             mainHandler.postDelayed(hide, maxOf(durationMs, readable).coerceAtMost(9000L))
         }
     }
 
     /**
-     * Anchors the card to the orb: above when there's headroom, and on the side with
-     * room to spare. The orb must never sit on top of what it is talking about.
+     * Rests the dock just above the navigation bar, full width. If the ringed control is
+     * down there, the dock moves to the top instead: it must never cover what it points at.
      */
-    private fun repositionBubble() {
-        val card = bubbleView ?: return
-        val params = bubbleParams ?: return
-        val margin = dp(14)
-        val orbSize = dp(64)
-        val gap = dp(10)
-
+    private fun placeDock() {
+        val card = dockView ?: return
+        val params = dockParams ?: return
+        val margin = dp(DOCK_MARGIN_DP)
+        val width = screenWidth() - margin * 2
         card.measure(
-            View.MeasureSpec.makeMeasureSpec(screenWidth() - margin * 2, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
         )
-        val w = card.measuredWidth
         val h = card.measuredHeight
-
-        val above = orbY - gap - h >= margin
-        params.y = (if (above) orbY - gap - h else orbY + orbSize + gap)
-            .coerceIn(margin, (screenHeight() - h - margin).coerceAtLeast(margin))
-
-        val orbCenterX = orbX + orbSize / 2
-        val onRight = orbCenterX > screenWidth() / 2
-        params.x = if (onRight) {
-            (orbX + orbSize - w).coerceAtLeast(margin)
-        } else {
-            orbX.coerceAtMost((screenWidth() - w - margin).coerceAtLeast(margin))
-        }
-
-        card.setTail(onTop = !above, onRight = onRight)
+        val bottomY = realHeight() - navBarHeight() - margin - h
+        val topY = statusBarHeight() + margin
+        val avoid = dockAvoid
+        val gap = dp(12)
+        val coversBottom = avoid != null && avoid.bottom > bottomY - gap && avoid.top < bottomY + h
+        val coversTop = avoid != null && avoid.top < topY + h + gap && avoid.bottom > topY
+        params.width = width
+        params.x = margin
+        params.y = if (coversBottom && !coversTop) topY else bottomY.coerceAtLeast(topY)
         runCatching { wm.updateViewLayout(card, params) }
     }
 
-    private fun animateBubbleIn() {
-        val card = bubbleView ?: return
-        bubbleAnimator?.cancel()
-        bubbleAnimator = ValueAnimator.ofFloat(card.alpha, 1f).apply {
-            duration = 220
+    private fun animateDockIn() {
+        val card = dockView ?: return
+        dockAnimator?.cancel()
+        card.alpha = 0f
+        dockAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 240
             interpolator = DecelerateInterpolator(1.5f)
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 card.alpha = t
-                card.translationY = dp(6) * (1f - t)
+                card.translationY = dp(10) * (1f - t)
             }
             start()
         }
     }
 
-    private fun fadeOutBubble() {
-        val card = bubbleView ?: return
-        bubbleAnimator?.cancel()
-        bubbleAnimator = ValueAnimator.ofFloat(card.alpha, 0f).apply {
+    private fun fadeOutDock() {
+        val card = dockView ?: return
+        dockAnimator?.cancel()
+        dockAnimator = ValueAnimator.ofFloat(card.alpha, 0f).apply {
             duration = 200
             addUpdateListener { anim -> card.alpha = anim.animatedValue as Float }
             addListener(object : android.animation.AnimatorListenerAdapter() {
@@ -884,12 +950,12 @@ class BubbleService : Service() {
         }
     }
 
-    private fun removeBubble() {
-        bubbleHide?.let { mainHandler.removeCallbacks(it) }
-        bubbleAnimator?.cancel()
-        bubbleView?.let { runCatching { wm.removeView(it) } }
-        bubbleView = null
-        bubbleParams = null
+    private fun removeDock() {
+        dockHide?.let { mainHandler.removeCallbacks(it) }
+        dockAnimator?.cancel()
+        dockView?.let { runCatching { wm.removeView(it) } }
+        dockView = null
+        dockParams = null
     }
 
     // ---- Plumbing ---------------------------------------------------------------
@@ -911,18 +977,42 @@ class BubbleService : Service() {
         )
     }
 
+    /**
+     * Placed in physical screen pixels, (0, 0) at the top-left of the glass, whatever the
+     * system bars are doing — so the handle and dock land exactly where they are computed.
+     */
+    private fun absoluteParams(width: Int, height: Int): WindowManager.LayoutParams =
+        overlayParams(width, height).apply {
+            gravity = Gravity.TOP or Gravity.START
+            flags = flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) fitInsetsTypes = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
+        }
+
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-    private fun screenWidth(): Int = resources.displayMetrics.widthPixels
-    private fun screenHeight(): Int = resources.displayMetrics.heightPixels
+    private fun screenWidth(): Int = OverlayHost.realScreenSize(this).x
+    private fun realHeight(): Int = OverlayHost.realScreenSize(this).y
+
+    private fun systemDimen(name: String, fallbackDp: Int): Int {
+        val id = resources.getIdentifier(name, "dimen", "android")
+        return if (id != 0) resources.getDimensionPixelSize(id) else dp(fallbackDp)
+    }
+
+    private fun statusBarHeight() = systemDimen("status_bar_height", 24)
+    private fun navBarHeight() = systemDimen("navigation_bar_height", 24)
 
     companion object {
         const val ACTION_STOP = "com.drishti.overlay.STOP"
         const val ACTION_CANCEL_RUN = "com.drishti.overlay.CANCEL_RUN"
         const val ACTION_SHOW = "com.drishti.overlay.SHOW"
         const val ACTION_COMPOSE = "com.drishti.overlay.COMPOSE"
+        const val ACTION_LISTEN = "com.drishti.overlay.LISTEN"
         const val ACTION_RUN_TASK = "com.drishti.overlay.RUN_TASK"
         private const val EXTRA_TASK = "task"
         private const val NOTIF_ID = 42
+        private const val DOCK_MARGIN_DP = 12
         private val COMMON_TERMS = listOf(
             "Wi-Fi", "Bluetooth", "WhatsApp", "YouTube", "Settings", "Google Pay", "PhonePe",
             "hotspot", "airplane mode", "dark mode", "font size", "ringtone", "alarm",
@@ -935,7 +1025,7 @@ class BubbleService : Service() {
 
         /**
          * Pause Aura: set the pref and tear down without recreating the service
-         * just to deliver an intent (which used to flash the orb/notif).
+         * just to deliver an intent (which used to flash the overlay/notif).
          */
         fun stop(context: Context) {
             AuraPrefs.get(context).setPaused(true)
@@ -949,6 +1039,12 @@ class BubbleService : Service() {
         fun openComposer(context: Context) {
             if (AuraPrefs.get(context).paused.value) return
             send(context, Intent(context, BubbleService::class.java).setAction(ACTION_COMPOSE))
+        }
+
+        /** Summoned as the assistant: listen hands-free. */
+        fun listen(context: Context) {
+            if (AuraPrefs.get(context).paused.value) return
+            send(context, Intent(context, BubbleService::class.java).setAction(ACTION_LISTEN))
         }
 
         fun runTask(context: Context, task: String) {

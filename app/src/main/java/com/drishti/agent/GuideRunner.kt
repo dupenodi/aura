@@ -47,7 +47,7 @@ class GuideRunner(
     @Volatile
     private var session: GuideSession? = null
 
-    /** Notifies the overlay when a session starts or ends so the orb can show activity. */
+    /** Notifies the overlay when a session starts or ends so the handle and glow can show activity. */
     var onRunStateChanged: ((running: Boolean) -> Unit)? = null
 
     val isPaused: Boolean get() = session?.paused == true
@@ -118,7 +118,7 @@ class GuideRunner(
         prefs.setLanguage(com.drishti.voice.AuraLanguage.fromTag(language.tag))
     }
 
-    /** The orb was tapped while the session waits for them: carry on from where they are. */
+    /** The handle was tapped while the session waits for them: carry on from where they are. */
     fun resume(): Boolean {
         val s = session ?: return false
         if (!s.paused) return false

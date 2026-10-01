@@ -48,6 +48,7 @@ class SettingsState(
     val useScreenshots: Boolean,
     val paused: Boolean,
     val permissions: PermissionState,
+    val isAssistant: Boolean,
 )
 
 class SettingsActions(
@@ -59,6 +60,7 @@ class SettingsActions(
     val onPaused: (Boolean) -> Unit,
     val onOpenPermissions: () -> Unit,
     val onDeleteHistory: () -> Unit,
+    val onOpenAssistant: () -> Unit,
 )
 
 @Composable
@@ -78,6 +80,19 @@ fun SettingsScreen(state: SettingsState, actions: SettingsActions) {
                 subtitle = if (state.naturalVoiceAvailable) "sarvam — clearer in every indian language" else "needs a sarvam key",
                 divider = false,
                 trailing = { Toggle(state.naturalVoice && state.naturalVoiceAvailable, { if (state.naturalVoiceAvailable) actions.onNaturalVoice(it) }) },
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+        SectionLabel("calling aura")
+        Group {
+            SettingRow(
+                "hold power to call aura",
+                subtitle = if (state.isAssistant) "or swipe up from a bottom corner" else "choose aura as the digital assistant app",
+                value = if (state.isAssistant) "on" else "set up",
+                valueColor = if (state.isAssistant) Aura.Positive else Aura.TextSecondary,
+                divider = false,
+                onClick = actions.onOpenAssistant,
             )
         }
 

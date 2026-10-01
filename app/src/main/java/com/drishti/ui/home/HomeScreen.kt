@@ -94,7 +94,7 @@ fun HomeScreen(
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "or hold the glow at the edge of your screen and speak — in any language",
+                    "or hold the light at the edge of your screen and speak — in any language",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )

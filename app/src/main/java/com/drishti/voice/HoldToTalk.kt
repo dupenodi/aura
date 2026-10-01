@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import com.drishti.ai.ApiKeyStore
 import com.drishti.core.agent.Language
 import com.drishti.core.llm.LlmException
+import com.drishti.core.speech.Endpointer
 import com.drishti.core.speech.SarvamRealtimeStt
 import com.drishti.core.speech.SarvamRestStt
 import kotlinx.coroutines.CancellationException
@@ -21,8 +22,9 @@ import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 
 /**
- * Hold the orb and talk; let go to send. Partial text streams back while they speak so they
- * can see they are being heard.
+ * Hold the handle and talk; let go to send. Or, summoned as the phone's assistant, talk
+ * hands-free and pause to send. Partial text streams back while they speak so they can see
+ * they are being heard.
  */
 interface HoldToTalk {
     /** Why listening couldn't produce a request, in terms we can explain. */
@@ -32,16 +34,19 @@ interface HoldToTalk {
 
     /**
      * [languageTag] null means detect it. [onFinal] gets the transcript and, when the
-     * engine detected it, the language it was spoken in.
+     * engine detected it, the language it was spoken in. With [handsFree], listening ends
+     * by itself when they stop talking. [onLevel] reports loudness (0..1) for the glow.
      */
     fun start(
         languageTag: String?,
         onPartial: (String) -> Unit,
         onFinal: (text: String, languageTag: String?) -> Unit,
         onFailure: (Failure) -> Unit,
+        handsFree: Boolean = false,
+        onLevel: (Float) -> Unit = {},
     )
 
-    /** Finger lifted: finish and deliver the final transcript. */
+    /** Finger lifted (or "done"): finish and deliver the final transcript. */
     fun stop()
 
     /** Dragged away or torn down: deliver nothing. */
@@ -87,12 +92,17 @@ class SarvamHoldToTalk(
         onPartial: (String) -> Unit,
         onFinal: (text: String, languageTag: String?) -> Unit,
         onFailure: (HoldToTalk.Failure) -> Unit,
+        handsFree: Boolean,
+        onLevel: (Float) -> Unit,
     ) {
         if (!hasPermission()) {
             onFailure(HoldToTalk.Failure.NoPermission)
             return
         }
         cancelled = false
+        mic.arm()
+        // Hands-free: nobody lifts a finger, so a pause after speaking ends the turn.
+        val endpointer = Endpointer(SAMPLE_RATE)
         // Null asks Sarvam to work the language out from the audio.
         val language = languageTag?.let { Language.fromTag(it) }
         val chunks = Channel<ByteArray>(Channel.UNLIMITED)
@@ -101,9 +111,12 @@ class SarvamHoldToTalk(
 
         // The microphone loop blocks, so it gets its own IO thread.
         scope.launch(Dispatchers.IO) {
-            val ok = mic.record { chunk ->
+            val ok = mic.record(maxMs = if (handsFree) 16_000 else 30_000) { chunk ->
                 synchronized(clip) { clip.write(chunk) }
                 chunks.trySend(chunk)
+                val verdict = endpointer.feed(chunk)
+                onLevel(endpointer.level)
+                if (handsFree && verdict != Endpointer.Verdict.Continue) mic.stop()
             }
             chunks.close()
             recorded.complete(ok)

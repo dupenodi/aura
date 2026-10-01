@@ -18,7 +18,7 @@ test that pins it (`core/src/test/...` unless noted).
 
 | # | Case | What Aura does | Where | Test |
 |---|------|----------------|-------|------|
-| 7 | Every step | Ring + label on the one thing to press, instruction spoken and in the bubble with Stop. Nothing is ever pressed for them | `GuideSession.show`, `PointerOverlay` | — |
+| 7 | Every step | Ring + label on the one thing to press, instruction spoken and in the dock (moved to the top if the target is at the bottom) with Stop. Nothing is ever pressed for them | `GuideSession.show`, `PointerOverlay` | — |
 | 8 | List or keyboard moved things since the screen was read | Bounds re-read from the live node just before drawing | `Device.liveBounds` | — |
 | 9 | Target below the fold | Scroll step with an animated swipe hint; the list says which way it can scroll | `ScreenEncoder` scroll lines, `PointerOverlay.showSwipe` | `scrollingRevealsRowsBelowTheFold` |
 | 10 | Model returns a reference that isn't on screen | Sent back with the reason, next attempt on the stronger model; three in a row ends politely | `StepResolver`, `GuideSession` problems | `anInvalidReferenceIsSentBackAndEscalated`, `threeBadStepsInARowStopWithAPlainMessage` |
@@ -35,9 +35,9 @@ test that pins it (`core/src/test/...` unless noted).
 | 16 | They press something else that goes somewhere | Follow them: next step is planned from where they are, the model is told what they pressed, no scolding | `WatchOutcome.OffTarget` | `aWrongPressIsFollowedNotScolded`, `GuideFuzzTest` |
 | 17 | They press something pressable that does nothing | "Not quite — tap inside the glowing circle", once per step, ring emphasised | `GuideSession.watch` | `aPressThatMissesAndDoesNothingGetsImmediateHelp` |
 | 18 | Typing step | Done when the field holds the text, or they stop typing for 3 s | `WatchOutcome.Typed` | `typingIsDoneWhenTheTextMatches` |
-| 19 | They hesitate | Repeat at 12 s, reassure + bigger ring at 30 s, pause at 60 s. The orb (or "Carry on") resumes from wherever they are; untouched for 10 min it ends quietly | `GuideConfig`, `pauseUntilResumed` | `hesitationRepeatsThenReassuresThenPausesAndResumes`, `aPausedSessionNobodyReturnsToEndsQuietly` |
+| 19 | They hesitate | Repeat at 12 s, reassure + bigger ring at 30 s, pause at 60 s. The edge handle (or "carry on") resumes from wherever they are; untouched for 10 min it ends quietly | `GuideConfig`, `pauseUntilResumed` | `hesitationRepeatsThenReassuresThenPausesAndResumes`, `aPausedSessionNobodyReturnsToEndsQuietly` |
 | 20 | A read fails mid-transition | Retried with backoff; only "can't see" if the service is really gone | `observeWithRetry` | — |
-| 21 | Our own orb/bubble/ring raise events | Ignored by package, in the service and in the session | `ScreenAgentAccessibilityService`, `GuideSession.run` | `app/.../ForegroundPackageSignalTest` |
+| 21 | Our own handle/glow/dock/ring raise events | Ignored by package, in the service and in the session | `ScreenAgentAccessibilityService`, `GuideSession.run` | `app/.../ForegroundPackageSignalTest` |
 
 ## Privacy and safety
 
@@ -57,6 +57,8 @@ test that pins it (`core/src/test/...` unless noted).
 | 28 | Sarvam returns no final | Last partial is used | `SarvamRealtimeStt` | `noFinalFallsBackToTheLastPartial` |
 | 29 | Speaking | Bulbul v3 streamed as PCM (first audio as soon as synthesised); repeats served from cache; phone TTS if Sarvam fails | `AuraVoice`, `SarvamTts` | `ttsStreamsPcmAndAsksForBulbulV3Explicitly`, `ttsFallsBackToRestWhenStreamingIsRefused` |
 | 30 | Odia | `or-IN` on the realtime socket, `od-IN` on REST and TTS | `Language` | `odiaUsesTheRealtimeSpellingAndAutoDetectReportsTheLanguage` |
+| 30a | Summoned as the assistant (hold power / corner swipe) | Edges light up and it listens hands-free; a 1.2 s pause after speech sends, 6 s of nothing stops, 15 s is the cap; "done" / "cancel" in the dock | `AssistActivity`, `Endpointer`, `SarvamHoldToTalk` | `EndpointerTest` |
+| 30b | Glow and ring both over the app being guided | Added as accessibility overlays (trusted), so taps still reach the app; an app-overlay fallback is capped at 0.8 opacity | `OverlayHost`, `GlowWindow` | device |
 
 ## Model and network
 

@@ -168,6 +168,7 @@ class MainActivity : ComponentActivity() {
                             useScreenshots = useScreenshots,
                             paused = paused,
                             permissions = permissions,
+                            isAssistant = remember(permissionEpoch) { isDefaultAssistant() },
                         ),
                         actions = SettingsActions(
                             onBack = { route = Route.Home },
@@ -183,6 +184,7 @@ class MainActivity : ComponentActivity() {
                                 history.clear()
                                 SessionRecorder.clear(this@MainActivity)
                             },
+                            onOpenAssistant = { openAssistantSettings() },
                         ),
                     )
 
@@ -260,6 +262,33 @@ class MainActivity : ComponentActivity() {
             return
         }
         notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    /** Whether aura is the phone's digital assistant (hold power / corner swipe). */
+    private fun isDefaultAssistant(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roles = getSystemService(android.app.role.RoleManager::class.java)
+            if (roles != null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_ASSISTANT)) {
+                return roles.isRoleHeld(android.app.role.RoleManager.ROLE_ASSISTANT)
+            }
+        }
+        val assistant = Settings.Secure.getString(contentResolver, "assistant").orEmpty()
+        return assistant.startsWith("$packageName/")
+    }
+
+    /**
+     * The assistant can't be requested with a dialog; it is chosen in Android's default-apps
+     * screen. Try the assistant page itself, then the default apps list.
+     */
+    private fun openAssistantSettings() {
+        val attempts = listOf(
+            Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
+            Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
+            Intent(Settings.ACTION_SETTINGS),
+        )
+        for (intent in attempts) {
+            if (runCatching { startActivity(intent) }.isSuccess) return
+        }
     }
 
     private fun readPermissions() = PermissionState(

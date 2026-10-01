@@ -3,6 +3,10 @@ package com.drishti.ui.onboarding
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -42,6 +46,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -196,7 +206,7 @@ private fun HowItWorks(onNext: () -> Unit) {
         }
         Spacer(Modifier.height(20.dp))
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Line(1, "hold the glow and say what you need, or tap it to type")
+            Line(1, "hold the light at the edge and say what you need, or tap it to type")
             Line(2, "a ring shows you exactly what to press")
             Line(3, "you press it — then i show the next step")
         }
@@ -222,7 +232,10 @@ private fun Line(n: Int, text: String) {
     }
 }
 
-/** A tiny settings screen with the ring moving down it, the way a real session looks. */
+/**
+ * A tiny settings screen the way a real session looks: light along the edges, the handle
+ * resting on the right, the ring moving down the list and the step in the dock below.
+ */
 @Composable
 private fun DemoPhone() {
     val rows = listOf("network & internet", "connected devices", "display & touch", "battery")
@@ -234,44 +247,81 @@ private fun DemoPhone() {
             at = (at + 1) % rows.size
         }
     }
-    Column(
+    val drift by rememberInfiniteTransition(label = "edge").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(5000, easing = LinearEasing)),
+        label = "drift",
+    )
+    val spectrum = Aura.Spectrum + Aura.Violet
+    Box(
         Modifier
             .width(240.dp)
             .clip(RoundedCornerShape(28.dp))
             .background(Aura.Surface)
-            .border(1.dp, Aura.Line, RoundedCornerShape(28.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .drawWithContent {
+                drawContent()
+                // The edge glow: the aura's colours drifting round the frame.
+                val shift = size.width * 2f * drift
+                val brush = Brush.linearGradient(
+                    spectrum,
+                    start = Offset(shift, 0f),
+                    end = Offset(shift + size.width, size.height),
+                    tileMode = TileMode.Mirror,
+                )
+                val r = CornerRadius(28.dp.toPx())
+                for (pass in 3 downTo 1) {
+                    drawRoundRect(brush, cornerRadius = r, style = Stroke(2.dp.toPx() * (1 + pass * 1.6f)), alpha = 0.16f / pass)
+                }
+                drawRoundRect(brush, cornerRadius = r, style = Stroke(2.dp.toPx()), alpha = 0.85f)
+            },
     ) {
-        Text("settings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
-        rows.forEachIndexed { i, label ->
-            val ringed = i == at
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (ringed) Aura.Violet.copy(alpha = 0.14f) else Color.Transparent)
-                    .border(if (ringed) 2.dp else 0.dp, if (ringed) Aura.Violet else Color.Transparent, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
-            ) {
-                Text(label, style = MaterialTheme.typography.bodyMedium, color = if (ringed) Aura.Text else Aura.TextSecondary)
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("settings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
+            rows.forEachIndexed { i, label ->
+                val ringed = i == at
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (ringed) Aura.Violet.copy(alpha = 0.14f) else Color.Transparent)
+                        .border(if (ringed) 2.dp else 0.dp, if (ringed) Aura.Violet else Color.Transparent, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                ) {
+                    Text(label, style = MaterialTheme.typography.bodyMedium, color = if (ringed) Aura.Text else Aura.TextSecondary)
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            // The dock: the step, in big type, with the aura dot.
+            AnimatedContent(targetState = at, transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(150)) }, label = "caption") { idx ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Aura.SurfaceHi)
+                        .border(1.dp, Aura.Line, RoundedCornerShape(16.dp))
+                        .padding(horizontal = 12.dp, vertical = 11.dp),
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(Brush.sweepGradient(spectrum)))
+                    Text(captions[idx], style = MaterialTheme.typography.bodyMedium, color = Aura.Text)
+                }
             }
         }
-        Spacer(Modifier.height(4.dp))
-        AnimatedContent(targetState = at, transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(150)) }, label = "caption") { idx ->
-            Text(
-                captions[idx],
-                style = MaterialTheme.typography.bodySmall,
-                color = Aura.Text,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Aura.SurfaceHi)
-                    .padding(10.dp),
-            )
-        }
+        // The handle: a sliver of light on the right edge.
+        Box(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 4.dp)
+                .size(width = 4.dp, height = 44.dp)
+                .clip(CircleShape)
+                .background(Brush.verticalGradient(spectrum)),
+        )
     }
 }
 
