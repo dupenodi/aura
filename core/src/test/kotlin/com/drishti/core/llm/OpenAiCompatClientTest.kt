@@ -160,4 +160,21 @@ class OpenAiCompatClientTest {
         c.call(request())
         assertNull((Json.parseToJsonElement(server.takeRequest().body.readUtf8()) as JsonObject)["reasoning"])
     }
+
+    @Test
+    fun anUnknownModelIdFallsThroughToTheNextModel() = runTest {
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"google/gemini-2.5-flash is not a valid model ID"}}"""))
+        server.enqueue(MockResponse().setBody(toolCallResponse))
+        client().call(request())
+        server.takeRequest()
+        val second = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("anthropic/claude-haiku-4.5", second["model"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun anUnknownModelWithNothingLeftToTryFails() = runTest {
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"model not found"}}"""))
+        val e = assertFailsWith<LlmException> { client().call(request().copy(fallbackModels = emptyList())) }
+        assertEquals(400, e.httpCode)
+    }
 }

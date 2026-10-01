@@ -260,6 +260,23 @@ class BubbleService : Service() {
         orbView?.lowPower = level in 1..15
     }
 
+    private var notification: Notification? = null
+
+    /**
+     * Adds (or drops) the microphone service type for the length of a hold-to-talk.
+     * Returns false if the system won't allow it, in which case the phone's own recogniser
+     * — which records in another process — is used instead.
+     */
+    private fun foregroundForMic(on: Boolean): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
+        val n = notification ?: return false
+        val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+            (if (on) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
+        return runCatching { startForeground(NOTIF_ID, n, type) }
+            .onFailure { android.util.Log.w("BubbleService", "microphone service type refused: ${it.message}") }
+            .isSuccess
+    }
+
     private fun startAsForeground() {
         val channelId = "aura_orb"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -291,6 +308,7 @@ class BubbleService : Service() {
             .addAction(0, "Pause Aura", stop)
             .setOngoing(true)
             .build()
+        this.notification = notification
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -459,7 +477,11 @@ class BubbleService : Service() {
     private fun beginListening() {
         if (listening) return
 
-        val session = HoldToTalk.create(this, agentScope, prefs.speechProvider.value) { keyterms() }
+        // Sarvam needs our own process to record; if the system won't grant that right now,
+        // the phone's recogniser (recording in its own process) still works.
+        val provider = prefs.speechProvider.value.takeIf { it != com.drishti.voice.SpeechProvider.Sarvam || foregroundForMic(true) }
+            ?: com.drishti.voice.SpeechProvider.OnDevice
+        val session = HoldToTalk.create(this, agentScope, provider) { keyterms() }
         if (!session.hasPermission()) {
             say("I need microphone permission — tap to grant it", 5000)
             openMicPermission()
@@ -526,6 +548,7 @@ class BubbleService : Service() {
         listening = false
         voice = null
         orbView?.listening = false
+        foregroundForMic(false)
     }
 
     /**

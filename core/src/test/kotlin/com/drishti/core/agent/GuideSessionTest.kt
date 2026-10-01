@@ -83,6 +83,29 @@ class GuideSessionTest {
     }
 
     @Test
+    fun redrawsInOtherAppsDoNotHoldUpTheNextStep() = runTest {
+        // A status bar and keyboard that redraw every 20ms, for the whole session.
+        val task = GoldenTasks.byId("battery_saver")
+        val phone = GoldenTasks.prepare(task)
+        val noise = object : com.drishti.core.agent.Device by phone {
+            override val events = kotlinx.coroutines.flow.merge(
+                phone.events,
+                kotlinx.coroutines.flow.flow {
+                    while (true) {
+                        emit(com.drishti.core.screen.UiEvent(com.drishti.core.screen.UiEvent.Type.CONTENT_CHANGED, "com.android.systemui"))
+                        kotlinx.coroutines.delay(20)
+                    }
+                },
+            )
+        }
+        val user = SimUser(phone, backgroundScope)
+        val session = GuideSession(task.prompt, Language.English, noise, OraclePlanner(task, phone), user, RecordingVoice(), clock = { testScheduler.currentTime })
+        val result = session.run()
+        assertEquals(Outcome.Completed, result.outcome)
+        result.metrics.forEach { assertTrue(it.settleMs < GuideConfig().settleMaxMs, "settle ${it.settleMs}ms") }
+    }
+
+    @Test
     fun appsWithoutClickEventsAreFollowedByWatchingTheScreen() = runTest {
         // YouTube in the sim raises no click events, like many Compose apps.
         val task = GoldenTasks.byId("yt_search")

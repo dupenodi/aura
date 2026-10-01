@@ -100,6 +100,10 @@ class GuideSession(
     var paused = false
         private set
 
+    /** Package of the screen last read. */
+    @Volatile
+    private var screenPkg: String = ""
+
     /** The orb was tapped while paused. */
     fun resume() {
         resumeSignal.trySend(Unit)
@@ -113,7 +117,12 @@ class GuideSession(
         val listener = launch(start = CoroutineStart.UNDISPATCHED) {
             device.events.collect { ev ->
                 if (ev.pkg == device.info.ownPackage) return@collect
-                if (!ev.isInteraction || ev.type == UiEvent.Type.SCROLLED) lastActivityAt = clock()
+                // Only the app they are in counts as "still moving". The status bar, the
+                // keyboard and background apps redraw constantly; letting them through made
+                // every step wait out the full settle cap.
+                val relevant = ev.pkg == screenPkg || ev.pkg.isEmpty() ||
+                    ev.type == UiEvent.Type.WINDOW_STATE || ev.type == UiEvent.Type.WINDOWS_CHANGED
+                if (relevant && (!ev.isInteraction || ev.type == UiEvent.Type.SCROLLED)) lastActivityAt = clock()
                 inbox.trySend(ev)
             }
         }
@@ -132,7 +141,11 @@ class GuideSession(
     }
 
     private suspend fun loop(): SessionResult {
-        ui.thinking(Phrases.get(Phrase.Looking, language))
+        // Said at once so there is no silence while the first step is worked out; the
+        // instruction cuts it off if it is ready sooner.
+        val looking = Phrases.get(Phrase.Looking, language)
+        ui.thinking(looking)
+        voice.say(looking, language)
 
         var note: String? = null
         var lastProgress: String? = null
@@ -271,6 +284,7 @@ class GuideSession(
 
     private suspend fun observe(): Observed? {
         val screen = device.snapshot() ?: return null
+        screenPkg = screen.pkg
         val labelled = screen.copy(
             appLabel = screen.appLabel
                 ?: HOME_SCREEN.takeIf { screen.pkg == device.info.launcherPackage }

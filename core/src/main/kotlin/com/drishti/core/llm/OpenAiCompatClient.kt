@@ -57,14 +57,28 @@ class OpenAiCompatClient(
     override suspend fun call(request: ToolCallRequest): ToolCallResult = try {
         callOnce(request)
     } catch (e: LlmException) {
-        // Some models can't switch reasoning off and reject the whole request; ask again
-        // without the setting rather than failing the step.
-        if (e.httpCode == 400 && sendReasoning && e.message.orEmpty().contains("reason", ignoreCase = true)) {
-            sendReasoning = false
-            callOnce(request)
-        } else {
-            throw e
+        val msg = e.message.orEmpty()
+        when {
+            // Some models can't switch reasoning off and reject the whole request; ask again
+            // without the setting rather than failing the step.
+            e.httpCode == 400 && sendReasoning && msg.contains("reason", ignoreCase = true) -> {
+                sendReasoning = false
+                call(request)
+            }
+            // Model ids drift (renamed, retired). An unknown id is refused before any
+            // provider-side failover happens, so move down the list here.
+            (e.httpCode == 400 || e.httpCode == 404) && isUnknownModel(msg) && request.fallbackModels.isNotEmpty() -> {
+                val next = request.fallbackModels.first()
+                call(request.copy(model = next, fallbackModels = request.fallbackModels.drop(1).filter { it != next }))
+            }
+            else -> throw e
         }
+    }
+
+    private fun isUnknownModel(message: String): Boolean {
+        val m = message.lowercase()
+        return m.contains("model") && (m.contains("not a valid") || m.contains("not found") || m.contains("does not exist") ||
+            m.contains("invalid model") || m.contains("no endpoints") || m.contains("unknown model"))
     }
 
     private suspend fun callOnce(request: ToolCallRequest): ToolCallResult {

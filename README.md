@@ -44,12 +44,13 @@ the per-step message is the task, a short history and the current screen.
 ## Testing
 
 ```bash
-./gradlew :core:test        # ~50 tests, ~10 s, no SDK or network needed
+./gradlew :core:test        # 52 tests, ~10 s, no SDK or network needed
 ./gradlew :core:eval        # real model on the simulated phone; prints a scorecard
 ./gradlew :core:eval --args="--models google/gemini-2.5-flash,openai/gpt-4.1-mini --runs 3"
 ./gradlew :core:eval --args="--language Hindi --tasks bluetooth_on,wa_video_amma"
 ./gradlew :core:eval --args="--speech"   # Sarvam TTS → realtime STT round trip
 ./gradlew :core:eval --args="--dump"     # every simulated screen as the model sees it
+./gradlew :core:eval --args="--list-models"   # OpenRouter models that take tools + images
 ```
 
 `:core:test` covers the encoder, every golden task end to end with a perfect guide, the

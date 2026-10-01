@@ -31,10 +31,12 @@ import java.time.format.DateTimeFormatter
  *   ./gradlew :core:eval --args="--tasks bluetooth_on,wa_video_amma --language Hindi"
  *   ./gradlew :core:eval --args="--speech"      # Sarvam TTS → STT round trip
  *   ./gradlew :core:eval --args="--dump"        # print every simulated screen as the model sees it
+ *   ./gradlew :core:eval --args="--list-models" # OpenRouter models that take tools and images
  */
 fun main(args: Array<String>) = runBlocking {
     val opts = parse(args)
     if ("dump" in opts) return@runBlocking dumpScreens()
+    if ("list-models" in opts) return@runBlocking listModels()
     if ("speech" in opts) return@runBlocking speechRoundTrip(opts["language"]?.let { Language.valueOf(it) } ?: Language.Hindi)
 
     val key = System.getenv("OPENROUTER_API_KEY").orEmpty()
@@ -218,4 +220,24 @@ private suspend fun speechRoundTrip(language: Language) {
     )
     println("STT final: \"${result.text}\" (${result.finalLatencyMs}ms after speech end)")
     println("Said:      \"$phrase\"")
+}
+
+/** OpenRouter's current models that can call tools and read images, cheapest first. */
+private fun listModels() {
+    val request = okhttp3.Request.Builder().url("https://openrouter.ai/api/v1/models").build()
+    val raw = com.drishti.core.llm.Http.shared.newCall(request).execute().use { it.body?.string().orEmpty() }
+    val data = kotlinx.serialization.json.Json.parseToJsonElement(raw).let { (it as kotlinx.serialization.json.JsonObject)["data"] as kotlinx.serialization.json.JsonArray }
+    data.map { it as kotlinx.serialization.json.JsonObject }
+        .filter { m ->
+            val params = m["supported_parameters"]?.toString().orEmpty()
+            val modality = (m["architecture"] as? kotlinx.serialization.json.JsonObject)?.get("input_modalities")?.toString().orEmpty()
+            params.contains("tool_choice") && modality.contains("image")
+        }
+        .map { m ->
+            val id = (m["id"] as kotlinx.serialization.json.JsonPrimitive).content
+            val prompt = ((m["pricing"] as? kotlinx.serialization.json.JsonObject)?.get("prompt") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
+            id to prompt * 1_000_000
+        }
+        .sortedBy { it.second }
+        .forEach { (id, perM) -> println("%-55s $%.2f / M input tokens".format(id, perM)) }
 }
