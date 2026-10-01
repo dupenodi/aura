@@ -68,7 +68,7 @@ class ScreenEncoderTest {
         val text = enc.text
         assertTrue(text.startsWith("App: Settings (com.android.settings) · Title: Network & internet"), text)
         assertTrue(text.contains("item \"Internet\" (Wi-Fi network)"), text)
-        assertTrue(text.contains("\"Airplane mode\" [off]"), text)
+        assertTrue(text.contains("switch \"Airplane mode\" [off]"), text)
         assertTrue(text.contains("button \"Navigate up\""), text)
         assertFalse(text.contains("Data Saver"), "off-screen rows are not listed:\n$text")
         assertFalse(text.contains("TextView"), "no class names leak:\n$text")

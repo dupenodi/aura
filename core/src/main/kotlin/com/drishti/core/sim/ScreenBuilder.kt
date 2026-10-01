@@ -24,9 +24,8 @@ class ScreenBuilder(
 
     fun root(): UiNode = UiNode(cls = "FrameLayout", bounds = Bounds(0, 0, width, height), children = nodes.toList(), key = newKey())
 
-    fun statusBar() {
-        nodes += UiNode(cls = "TextView", text = "9:41", bounds = Bounds(40, 20, 200, 90), key = newKey())
-    }
+    /** The status bar is its own window; the active-window tree never contains it. */
+    fun statusBar() = Unit
 
     // ---- Building blocks --------------------------------------------------------------------
 

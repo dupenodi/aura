@@ -29,6 +29,7 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    System.getProperty("wire.ids")?.let { systemProperty("wire.ids", it) }
     // Live evals hit real model APIs; they run through the `eval` task, never in `test`.
     exclude("**/LiveEval*")
     testLogging {

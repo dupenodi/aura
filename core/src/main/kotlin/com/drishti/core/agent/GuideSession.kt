@@ -118,13 +118,14 @@ class GuideSession(
             }
         }
         // Opens the model connection while the first screen is being read.
-        launch { runCatching { planner.warmUp() } }
+        val warm = launch { runCatching { planner.warmUp() } }
         try {
             loop()
         } catch (e: CancellationException) {
             trace("end", mapOf("outcome" to "cancelled"))
             throw e
         } finally {
+            warm.cancel()
             listener.cancel()
             ui.hide()
         }

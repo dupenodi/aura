@@ -293,7 +293,7 @@ object ScreenEncoder {
         val c = node.cls
         return when {
             node.editable || c.contains("EditText") -> "field"
-            c.contains("Switch") || c.contains("Toggle") -> "switch"
+            c.contains("Switch") || c.contains("Toggle") || (toggleState(node) != null && !c.contains("CheckBox", true)) -> "switch"
             c.contains("CheckBox", ignoreCase = true) -> "checkbox"
             c.contains("RadioButton") -> "radio"
             c.contains("SeekBar") || c.contains("Slider") -> "slider"
