@@ -30,10 +30,14 @@ interface HoldToTalk {
 
     fun hasPermission(): Boolean
 
+    /**
+     * [languageTag] null means detect it. [onFinal] gets the transcript and, when the
+     * engine detected it, the language it was spoken in.
+     */
     fun start(
-        languageTag: String,
+        languageTag: String?,
         onPartial: (String) -> Unit,
-        onFinal: (String) -> Unit,
+        onFinal: (text: String, languageTag: String?) -> Unit,
         onFailure: (Failure) -> Unit,
     )
 
@@ -79,9 +83,9 @@ class SarvamHoldToTalk(
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     override fun start(
-        languageTag: String,
+        languageTag: String?,
         onPartial: (String) -> Unit,
-        onFinal: (String) -> Unit,
+        onFinal: (text: String, languageTag: String?) -> Unit,
         onFailure: (HoldToTalk.Failure) -> Unit,
     ) {
         if (!hasPermission()) {
@@ -89,7 +93,8 @@ class SarvamHoldToTalk(
             return
         }
         cancelled = false
-        val language = Language.fromTag(languageTag)
+        // Null asks Sarvam to work the language out from the audio.
+        val language = languageTag?.let { Language.fromTag(it) }
         val chunks = Channel<ByteArray>(Channel.UNLIMITED)
         val clip = ByteArrayOutputStream()
         val recorded = CompletableDeferred<Boolean>()
@@ -105,12 +110,12 @@ class SarvamHoldToTalk(
         }
 
         job = scope.launch(Dispatchers.IO) {
-            val text = try {
+            val heard = try {
                 realtime.transcribe(
                     chunks.consumeAsFlow(),
                     SarvamRealtimeStt.Config(language = language, keyterms = keyterms(), sampleRate = SAMPLE_RATE),
                     onPartial = { if (!cancelled) onPartial(it) },
-                ).text
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: LlmException) {
@@ -124,19 +129,20 @@ class SarvamHoldToTalk(
                     onFailure(HoldToTalk.Failure.NoSpeech)
                     return@launch
                 }
-                runCatching { rest.transcribe(pcm, SAMPLE_RATE, language).text }.getOrElse {
+                runCatching { rest.transcribe(pcm, SAMPLE_RATE, language) }.getOrElse {
                     Log.w(TAG, "REST speech failed too: ${it.message}")
                     onFailure(HoldToTalk.Failure.Error)
                     return@launch
                 }
             }
             if (cancelled) return@launch
+            val text = heard.text.trim()
             if (!recorded.await()) {
                 onFailure(HoldToTalk.Failure.Unavailable)
             } else if (text.isBlank()) {
                 onFailure(HoldToTalk.Failure.NoSpeech)
             } else {
-                onFinal(text.trim())
+                onFinal(text, (heard.language ?: Language.detect(text))?.tag)
             }
         }
     }

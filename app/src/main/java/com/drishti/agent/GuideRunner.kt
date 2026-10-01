@@ -6,6 +6,7 @@ import com.drishti.ai.Llm
 import com.drishti.core.agent.GuideConfig
 import com.drishti.core.agent.GuideSession
 import com.drishti.core.agent.GuideUi
+import com.drishti.core.agent.Language
 import com.drishti.core.agent.Outcome
 import com.drishti.core.agent.ScreenshotPolicy
 import com.drishti.core.agent.StepPlanner
@@ -56,14 +57,25 @@ class GuideRunner(
         scope.launch { runCatching { planner.warmUp() } }
     }
 
-    fun runTask(task: String) {
+    /**
+     * Starts a session. [spoken] is the language speech recognition heard, if it said.
+     * Under automatic language: what they spoke, else the script they typed in, else the
+     * last language they used.
+     */
+    fun runTask(task: String, spoken: Language? = null) {
         job?.cancel()
+        val language = if (prefs.autoLanguage.value) {
+            (spoken ?: Language.detect(task))?.also { remember(it) } ?: prefs.language.value.core
+        } else {
+            prefs.language.value.core
+        }
         job = scope.launch {
             onRunStateChanged?.invoke(true)
             val recorder = SessionRecorder(context, task)
+            recorder.record("language", mapOf("language" to language.name, "auto" to prefs.autoLanguage.value))
             val s = GuideSession(
                 task = task,
-                language = prefs.language.value.core,
+                language = language,
                 device = device,
                 planner = planner,
                 ui = ui,
@@ -99,6 +111,11 @@ class GuideRunner(
                 onRunStateChanged?.invoke(false)
             }
         }
+    }
+
+    /** Typed romanised text has no script to go by; the last spoken language is the best guess. */
+    private fun remember(language: Language) {
+        prefs.setLanguage(com.drishti.voice.AuraLanguage.fromTag(language.tag))
     }
 
     /** The orb was tapped while the session waits for them: carry on from where they are. */

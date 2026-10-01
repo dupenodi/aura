@@ -127,8 +127,8 @@ class BubbleService : Service() {
                 durationMs = 0,
                 tag = "paused",
                 chips = listOf(
-                    BubbleChip("Carry on", primary = true) { runner.resume() },
-                    BubbleChip("Stop", primary = false) { stopRun() },
+                    BubbleChip("carry on", primary = true) { runner.resume() },
+                    BubbleChip("stop", primary = false) { stopRun() },
                 ),
             )
         }.let { }
@@ -173,7 +173,7 @@ class BubbleService : Service() {
             return
         }
         if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Aura needs permission to draw over apps", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "aura needs permission to show over other apps", Toast.LENGTH_LONG).show()
             stopSelf()
             return
         }
@@ -241,14 +241,8 @@ class BubbleService : Service() {
         super.onDestroy()
     }
 
-    /** Presence changes in Settings should reach the orb immediately. */
+    /** Pausing from the app or the notification takes the overlay down at once. */
     private fun observePrefs() {
-        uiScope.launch {
-            prefs.orbSkin.collect { skin -> orbView?.skin = skin }
-        }
-        uiScope.launch {
-            prefs.glow.collect { level -> orbView?.glow = level }
-        }
         uiScope.launch {
             prefs.paused.collect { paused -> if (paused) stopSelf() }
         }
@@ -305,7 +299,7 @@ class BubbleService : Service() {
             .setContentText(getString(R.string.overlay_notification_text))
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentIntent(open)
-            .addAction(0, "Pause Aura", stop)
+            .addAction(0, "pause aura", stop)
             .setOngoing(true)
             .build()
         this.notification = notification
@@ -321,7 +315,7 @@ class BubbleService : Service() {
 
     private fun showOrb() {
         val size = dp(64)
-        val view = OrbView(this).apply { applyPrefs(prefs) }
+        val view = OrbView(this)
 
         // Return to where the user last parked it; otherwise rest at the right edge,
         // comfortably above the gesture bar.
@@ -483,7 +477,7 @@ class BubbleService : Service() {
             ?: com.drishti.voice.SpeechProvider.OnDevice
         val session = HoldToTalk.create(this, agentScope, provider) { keyterms() }
         if (!session.hasPermission()) {
-            say("I need microphone permission — tap to grant it", 5000)
+            say("i need the microphone to hear you — opening aura so you can allow it", 5000)
             openMicPermission()
             return
         }
@@ -494,19 +488,24 @@ class BubbleService : Service() {
         voiceOut.stop()
         // Open the model connection while they talk, so the first step isn't waiting on TLS.
         runner.warmUp()
-        say("Listening — release to send", 30_000, tag = "listening", chips = emptyList())
+        say("listening… let go when you're done", 30_000, tag = "listening", chips = emptyList())
 
         session.start(
-            languageTag = prefs.language.value.tag,
+            // Null: work the language out from what they say.
+            languageTag = if (prefs.autoLanguage.value) null else prefs.language.value.tag,
             onPartial = { partial ->
                 mainHandler.post {
                     if (listening) say("\u201C$partial\u201D", 30_000, "listening", emptyList())
                 }
             },
-            onFinal = { text ->
+            onFinal = { text, tag ->
                 mainHandler.post {
                     endListening()
-                    if (text.isNotBlank()) startTask(text) else say("I didn't catch that", 2500)
+                    if (text.isNotBlank()) {
+                        startTask(text, tag?.let { com.drishti.core.agent.Language.fromTag(it) })
+                    } else {
+                        say("i didn't catch that", 2500)
+                    }
                 }
             },
             onFailure = { reason ->
@@ -515,13 +514,13 @@ class BubbleService : Service() {
                     say(
                         when (reason) {
                             HoldToTalk.Failure.NoPermission ->
-                                "I need microphone permission to listen"
+                                "i need the microphone to hear you"
                             HoldToTalk.Failure.Unavailable ->
-                                "Voice input isn't available on this phone — type instead"
+                                "voice isn't available on this phone — tap me to type instead"
                             HoldToTalk.Failure.NoSpeech ->
-                                "I didn't catch that — hold me and try again"
+                                "i didn't catch that — hold me and try again"
                             HoldToTalk.Failure.Error ->
-                                "Something went wrong listening — type instead"
+                                "something went wrong listening — tap me to type instead"
                         },
                         3500,
                     )
@@ -587,7 +586,7 @@ class BubbleService : Service() {
         }
 
         val root = android.widget.FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#B3000000"))
+            setBackgroundColor(Color.parseColor("#99000000"))
             setOnClickListener { hideComposer() }
             // TYPE_APPLICATION_OVERLAY windows don't honour SOFT_INPUT_ADJUST_RESIZE, so
             // lift the sheet by the keyboard's real height instead of hoping it resizes.
@@ -611,10 +610,10 @@ class BubbleService : Service() {
         }
         panel.addView(
             TextView(this).apply {
-                text = "What do you need?"
-                textSize = 18f
-                typeface = OverlayFonts.display(context)
-                setTextColor(Color.parseColor("#F2F0FF"))
+                text = "what do you need?"
+                textSize = 20f
+                typeface = OverlayFonts.medium(context)
+                setTextColor(Color.parseColor("#F4F4F5"))
             },
         )
         val submit = { text: String ->
@@ -626,16 +625,15 @@ class BubbleService : Service() {
         }
 
         val input = EditText(this).apply {
-            hint = "Ask, or hold the orb to talk"
+            hint = "ask in any language"
             typeface = OverlayFonts.display(context)
-            setTextColor(Color.parseColor("#F2F0FF"))
-            setHintTextColor(Color.parseColor("#6D6A85"))
-            textSize = 15f
+            setTextColor(Color.parseColor("#F4F4F5"))
+            setHintTextColor(Color.parseColor("#8B8B94"))
+            textSize = 17f
             background = null
             // Wraps over a few lines but keeps a send action — people expect the
             // keyboard's action key to submit, not to insert a newline.
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
             setHorizontallyScrolling(false)
             maxLines = 4
@@ -658,12 +656,12 @@ class BubbleService : Service() {
         )
 
         val send = TextView(this).apply {
-            text = "Go"
-            textSize = 15f
-            typeface = OverlayFonts.display(context)
+            text = "show me"
+            textSize = 16f
+            typeface = OverlayFonts.medium(context)
             gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#07070B"))
-            setPadding(0, dp(15), 0, dp(15))
+            setTextColor(Color.parseColor("#09090B"))
+            setPadding(0, dp(17), 0, dp(17))
             background = GradientPill(resources.displayMetrics.density)
             setOnClickListener { submit(input.text?.toString().orEmpty()) }
         }
@@ -727,14 +725,14 @@ class BubbleService : Service() {
         composerView = null
     }
 
-    private fun startTask(task: String) {
+    private fun startTask(task: String, spoken: com.drishti.core.agent.Language? = null) {
         if (!isOperable()) return
         hideComposer()
         // Optimistic so a quick tap stops even before the agent job posts running=true.
         running = true
         orbView?.busy = true
         sayHelping("\u201C${task.trim()}\u201D", 0)
-        runner.runTask(task)
+        runner.runTask(task, spoken)
     }
 
     private fun stopRun() {
@@ -742,7 +740,7 @@ class BubbleService : Service() {
         running = false
         orbView?.busy = false
         voiceOut.stop()
-        say("Stopped.", 2500)
+        say("stopped", 2000)
     }
 
     // ---- Speech bubble ----------------------------------------------------------
@@ -755,7 +753,7 @@ class BubbleService : Service() {
             text = text,
             durationMs = durationMs,
             tag = "helping",
-            chips = listOf(BubbleChip("Stop", primary = true) { stopRun() }),
+            chips = listOf(BubbleChip("stop", primary = false) { stopRun() }),
         )
     }
 
@@ -976,10 +974,10 @@ class BubbleService : Service() {
 /** Rounded dark sheet for the composer. */
 private class ComposerBackground(private val density: Float) : android.graphics.drawable.Drawable() {
     private val fill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#F50B0B13")
+        color = Color.parseColor("#FA141417")
     }
     private val stroke = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#4C7EF2FF")
+        color = Color.parseColor("#26262C")
         style = android.graphics.Paint.Style.STROKE
         strokeWidth = 1f * density
     }
@@ -1000,27 +998,20 @@ private class ComposerBackground(private val density: Float) : android.graphics.
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }
 
-/** The cyan→purple call-to-action pill. */
+/** The composer's main button. */
 private class GradientPill(private val density: Float) : android.graphics.drawable.Drawable() {
     private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
     private val rect = android.graphics.RectF()
 
     override fun onBoundsChange(bounds: android.graphics.Rect) {
-        paint.shader = android.graphics.LinearGradient(
-            bounds.left.toFloat(),
-            bounds.top.toFloat(),
-            bounds.right.toFloat(),
-            bounds.bottom.toFloat(),
-            Color.parseColor("#7EF2FF"),
-            Color.parseColor("#A06BFF"),
-            android.graphics.Shader.TileMode.CLAMP,
-        )
+        // Plain light button: the aura's colour is kept for the aura itself.
+        paint.color = Color.parseColor("#F4F4F5")
     }
 
     override fun draw(canvas: android.graphics.Canvas) {
         val b = bounds
         rect.set(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat())
-        val r = 15f * density
+        val r = 16f * density
         canvas.drawRoundRect(rect, r, r, paint)
     }
 

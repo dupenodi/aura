@@ -25,7 +25,7 @@ class VoiceSession(private val context: Context) : HoldToTalk {
     private var finished = false
 
     private var onPartial: ((String) -> Unit)? = null
-    private var onFinal: ((String) -> Unit)? = null
+    private var onFinal: ((String, String?) -> Unit)? = null
     private var onFailure: ((HoldToTalk.Failure) -> Unit)? = null
 
     /** Best transcript so far, used when the user releases before the engine settles. */
@@ -40,9 +40,9 @@ class VoiceSession(private val context: Context) : HoldToTalk {
      * platform recogniser falls back to its default when it can't serve that language.
      */
     override fun start(
-        languageTag: String,
+        languageTag: String?,
         onPartial: (String) -> Unit,
-        onFinal: (String) -> Unit,
+        onFinal: (text: String, languageTag: String?) -> Unit,
         onFailure: (HoldToTalk.Failure) -> Unit,
     ) {
         this.onPartial = onPartial
@@ -117,8 +117,8 @@ class VoiceSession(private val context: Context) : HoldToTalk {
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, languageTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag ?: java.util.Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, languageTag ?: java.util.Locale.getDefault().toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
@@ -144,7 +144,8 @@ class VoiceSession(private val context: Context) : HoldToTalk {
     private fun succeed(text: String) {
         if (finished) return
         finished = true
-        onFinal?.invoke(text)
+        // The platform recogniser can't detect; the script of what it heard can.
+        onFinal?.invoke(text, com.drishti.core.agent.Language.detect(text)?.tag)
         destroy()
     }
 

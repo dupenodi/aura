@@ -207,16 +207,16 @@ class PointerOverlay(private val context: Context) {
             strokeWidth = dp(2.5f)
         }
         private val labelBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#F20B1020")
+            color = Color.parseColor("#F2141417")
             style = Paint.Style.FILL
         }
         private val labelTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = NEON
+            color = Color.parseColor("#F4F4F5")
+            typeface = OverlayFonts.medium(context)
             // sp, not dp: follows the phone's font size setting, which older users raise.
             textSize = android.util.TypedValue.applyDimension(
                 android.util.TypedValue.COMPLEX_UNIT_SP, 17f, context.resources.displayMetrics,
             )
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
 
         private val cursorGlowOuter = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -613,9 +613,10 @@ class PointerOverlay(private val context: Context) {
 
         companion object {
             // Aura's guidance accent: cyan core bleeding into violet.
-            private val NEON = Color.parseColor("#4DE8FF")
-            private val NEON_BRIGHT = Color.parseColor("#D5FAFF")
-            private val NEON_DEEP = Color.parseColor("#A06BFF")
+            // Light violet reads on both light and dark apps; the indigo bloom keeps it soft.
+            private val NEON = Color.parseColor("#C4B5FD")
+            private val NEON_BRIGHT = Color.parseColor("#FFFFFF")
+            private val NEON_DEEP = Color.parseColor("#818CF8")
             // Android force-caps FLAG_NOT_TOUCHABLE overlay windows at alpha 0.8, so
             // budget for that multiplier when picking how dark the scrim should read.
             private const val SCRIM_ALPHA = 132f

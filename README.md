@@ -1,8 +1,9 @@
 # Aura (Drishti)
 
-Aura is a floating orb on Android that **shows** people how to do things on their own phone.
-Ask it — by voice, in any of 11 Indian languages, or by typing — and it rings the one thing to
-press, says what to do, and waits for the person's own finger. It never taps, types or swipes
+Aura is a glow at the edge of an Android screen that **shows** people how to do things on their
+own phone. Ask it — by voice in any of 11 Indian languages (detected automatically), or by
+typing — and it rings the one thing to press, says what to do, and waits for the person's own
+finger. It never taps, types or swipes
 for them. When they press the wrong thing it carries on from wherever they ended up; when they
 hesitate it repeats, reassures, then waits instead of giving up.
 
@@ -13,9 +14,9 @@ cp local.properties.example local.properties   # add OPENROUTER_API_KEY and SARV
 ./gradlew installDebug
 ```
 
-Then open Aura and grant: **Accessibility** (Settings → Accessibility → Aura; on Android 13+ a
-sideloaded app first needs App info → ⋮ → *Allow restricted settings*), **Display over other
-apps**, and **Microphone**.
+Then open aura; onboarding walks through the three permissions — accessibility (if its switch
+is greyed out on a sideloaded build: app info → ⋮ → *allow restricted settings*), display over
+other apps, and the microphone.
 
 ## How it works
 
@@ -32,7 +33,8 @@ apps**, and **Microphone**.
 :app   (Android)
   accessibility/  event stream + on-demand snapshots + screenshots, read-only
   agent/          GuideRunner, AndroidDevice
-  overlay/        orb, speech bubble, ring/cursor/swipe hint
+  overlay/        the aura glow, speech bubble, ring/cursor/swipe hint
+  ui/             onboarding, home, settings (Compose, Geist, lowercase)
   voice/          AuraVoice (Sarvam → on-device TTS), hold-to-talk (Sarvam realtime → REST → on-device)
 ```
 

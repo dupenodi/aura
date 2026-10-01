@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Aura</string>
-    <string name="accessibility_service_label">Aura</string>
-    <string name="accessibility_service_description">Aura reads what is on screen so it can point at the right button and show you what to do next. It never taps for you. Screen content is used only for the step you asked for. Password fields and banking apps are skipped.</string>
-    <string name="overlay_channel_name">Aura</string>
-    <string name="overlay_channel_description">Keeps the floating orb ready</string>
-    <string name="overlay_notification_title">Aura is ready</string>
-    <string name="overlay_notification_text">Tap the orb to type, hold it to talk</string>
+    <string name="app_name">aura</string>
+    <string name="accessibility_service_label">aura</string>
+    <string name="accessibility_service_description">aura reads what is on your screen so it can light up the right button and tell you what to do next. it never taps or types for you. banking, payment and health apps are never read.</string>
+    <string name="overlay_channel_name">aura</string>
+    <string name="overlay_channel_description">keeps the glow ready over your apps</string>
+    <string name="overlay_notification_title">aura is ready</string>
+    <string name="overlay_notification_text">tap the glow to type, hold it to talk</string>
 </resources>

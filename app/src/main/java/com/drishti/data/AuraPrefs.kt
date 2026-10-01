@@ -2,8 +2,6 @@ package com.drishti.data
 
 import android.content.Context
 import android.content.SharedPreferences
-import com.drishti.ui.theme.GlowLevel
-import com.drishti.ui.theme.OrbSkin
 import com.drishti.voice.AuraLanguage
 import com.drishti.voice.SpeechProvider
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,11 +19,6 @@ class AuraPrefs private constructor(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences("aura_prefs", Context.MODE_PRIVATE)
 
-    private val _orbSkin = MutableStateFlow(OrbSkin.fromOrdinal(prefs.getInt(KEY_ORB, 0)))
-    val orbSkin: StateFlow<OrbSkin> = _orbSkin
-
-    private val _glow = MutableStateFlow(GlowLevel.fromOrdinal(prefs.getInt(KEY_GLOW, 1)))
-    val glow: StateFlow<GlowLevel> = _glow
 
     private val _speakAloud = MutableStateFlow(prefs.getBoolean(KEY_SPEAK, true))
     val speakAloud: StateFlow<Boolean> = _speakAloud
@@ -33,8 +26,16 @@ class AuraPrefs private constructor(context: Context) {
     private val _paused = MutableStateFlow(prefs.getBoolean(KEY_PAUSED, false))
     val paused: StateFlow<Boolean> = _paused
 
+    /**
+     * The language Aura speaks when it can't tell from the request — and, when automatic
+     * is off, always. Under automatic it follows the last language they spoke.
+     */
     private val _language = MutableStateFlow(AuraLanguage.fromTag(prefs.getString(KEY_LANGUAGE, null)))
     val language: StateFlow<AuraLanguage> = _language
+
+    /** Detect the language from what they say or type. On by default. */
+    private val _autoLanguage = MutableStateFlow(prefs.getBoolean(KEY_AUTO_LANGUAGE, true))
+    val autoLanguage: StateFlow<Boolean> = _autoLanguage
 
     // Sarvam is the better voice for Indian languages, so it is the default whenever a key
     // was built in; the phone's own engine otherwise.
@@ -73,16 +74,6 @@ class AuraPrefs private constructor(context: Context) {
         get() = prefs.getBoolean(KEY_ONBOARDED, false)
         set(value) = prefs.edit().putBoolean(KEY_ONBOARDED, value).apply()
 
-    fun setOrbSkin(skin: OrbSkin) {
-        prefs.edit().putInt(KEY_ORB, skin.ordinal).apply()
-        _orbSkin.value = skin
-    }
-
-    fun setGlow(level: GlowLevel) {
-        prefs.edit().putInt(KEY_GLOW, level.ordinal).apply()
-        _glow.value = level
-    }
-
     fun setSpeakAloud(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_SPEAK, enabled).apply()
         _speakAloud.value = enabled
@@ -91,6 +82,11 @@ class AuraPrefs private constructor(context: Context) {
     fun setPaused(paused: Boolean) {
         prefs.edit().putBoolean(KEY_PAUSED, paused).apply()
         _paused.value = paused
+    }
+
+    fun setAutoLanguage(auto: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_LANGUAGE, auto).apply()
+        _autoLanguage.value = auto
     }
 
     fun setLanguage(language: AuraLanguage) {
@@ -122,8 +118,7 @@ class AuraPrefs private constructor(context: Context) {
         private const val KEY_VOICE_SPEAKER = "voice_speaker"
         private const val KEY_VOICE_PACE = "voice_pace"
         private const val KEY_SCREENSHOTS = "use_screenshots"
-        private const val KEY_ORB = "orb_skin"
-        private const val KEY_GLOW = "glow"
+        private const val KEY_AUTO_LANGUAGE = "auto_language"
         private const val KEY_SPEAK = "speak_aloud"
         private const val KEY_PAUSED = "paused"
         private const val KEY_ONBOARDED = "onboarded"

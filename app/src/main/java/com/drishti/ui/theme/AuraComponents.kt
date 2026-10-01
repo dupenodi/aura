@@ -1,211 +1,177 @@
 package com.drishti.ui.theme
 
-import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
- * The orb — Aura's whole identity. A radial gradient sphere with the light source
- * up and to the left, wrapped in a soft halo that breathes.
+ * The aura: soft light in the spectrum's colours, drifting and mixing slowly, like
+ * something is quietly thinking. It replaces the old glossy sphere everywhere.
  *
- * [breathing] drives the idle float/pulse; turn it off for static contexts such as
- * list rows, battery saver, or screenshots.
+ * [energy] 0..1 speeds it up and brightens it — idle sits near 0.3, listening or working
+ * near 1. Each colour orbits on its own path, so the mix never repeats exactly.
  */
 @Composable
-fun AuraOrb(
+fun AuraField(
     modifier: Modifier = Modifier,
-    size: Dp = 88.dp,
-    skin: OrbSkin = OrbSkin.Aurora,
-    glow: GlowLevel = GlowLevel.Balanced,
-    breathing: Boolean = true,
+    energy: Float = 0.35f,
+    animate: Boolean = true,
 ) {
-    val pulse = if (breathing) {
-        val transition = rememberInfiniteTransition(label = "orb")
-        transition.animateFloat(
+    val e by animateFloatAsState(energy.coerceIn(0f, 1f), tween(600), label = "energy")
+    val phase = if (animate) {
+        rememberInfiniteTransition(label = "aura").animateFloat(
             initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(3400),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "orbPulse",
+            targetValue = (2 * PI).toFloat(),
+            animationSpec = infiniteRepeatable(tween(14_000, easing = LinearEasing)),
+            label = "phase",
         ).value
     } else {
-        0.5f
+        0.6f
     }
-
-    val haloAlpha = (0.55f + 0.35f * pulse) * glow.fraction
-    val haloScale = 1f + 0.12f * pulse * glow.scale.coerceAtMost(1f)
-
-    Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
-        // Halo bleeds well past the sphere, so the drawing box is deliberately larger.
-        Box(
-            Modifier
-                .size(size * 1.55f)
-                .drawBehind {
-                    val r = (this.size.minDimension / 2f) * haloScale
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                skin.halo.copy(alpha = haloAlpha),
-                                Color.Transparent,
-                            ),
-                            center = center,
-                            radius = r,
-                        ),
-                        radius = r,
-                    )
-                },
-        )
-        Box(
-            Modifier
-                .size(size)
-                .drawBehind {
-                    val r = this.size.minDimension / 2f
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colorStops = arrayOf(
-                                0f to skin.inner,
-                                0.56f to skin.mid,
-                                1f to skin.outer,
-                            ),
-                            // Light source at 34%/28%, sized to the farthest corner so the
-                            // stops land where CSS puts them — anything tighter and the
-                            // highlight collapses to a dot.
-                            center = Offset(this.size.width * 0.34f, this.size.height * 0.28f),
-                            radius = r * 1.95f,
-                        ),
-                        radius = r,
-                    )
-                    // Inner rim light keeps the sphere from reading flat.
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(Color.Transparent, Color.White.copy(alpha = 0.16f)),
-                            center = center,
-                            radius = r,
-                        ),
-                        radius = r,
-                    )
-                },
+    Canvas(modifier) {
+        val r = size.minDimension / 2f
+        val c = center
+        // Different speeds per colour so the blend keeps changing.
+        val speeds = floatArrayOf(1f, -1.3f, 0.8f, -0.6f)
+        val spin = 1f + 1.6f * e
+        Aura.Spectrum.forEachIndexed { i, color ->
+            val a = phase * speeds[i] * spin + i * (PI.toFloat() / 2f)
+            val reach = r * (0.32f + 0.12f * e)
+            val p = Offset(c.x + cos(a) * reach, c.y + sin(a * 1.3f) * reach)
+            val radius = r * (0.78f + 0.1f * sin(phase * 2 + i))
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(color.copy(alpha = 0.55f + 0.35f * e), color.copy(alpha = 0f)),
+                    center = p,
+                    radius = radius,
+                ),
+                radius = radius,
+                center = p,
+                blendMode = BlendMode.Screen,
+            )
+        }
+        // A bright core so it reads as light, not paint.
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(Color.White.copy(alpha = 0.10f + 0.18f * e), Color.Transparent),
+                center = c,
+                radius = r * 0.55f,
+            ),
+            radius = r * 0.55f,
+            center = c,
+            blendMode = BlendMode.Screen,
         )
     }
 }
 
-/** The mono uppercase eyebrow that titles nearly every block in the design. */
+/** A small aura in a circle: the app's mark in headers and rows. */
 @Composable
-fun AuraEyebrow(
-    text: String,
-    modifier: Modifier = Modifier,
-    color: Color = Aura.TextGhost,
-) {
-    Text(
-        text = text.uppercase(),
-        style = MaterialTheme.typography.labelSmall,
-        color = color,
-        modifier = modifier,
-    )
-}
-
-/** Primary action: the cyan→purple gradient slab. */
-@Composable
-fun AuraPrimaryButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
+fun AuraMark(size: Dp = 32.dp, energy: Float = 0.35f, animate: Boolean = true) {
     Box(
-        modifier = modifier
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Aura.SurfaceHi),
+    ) {
+        AuraField(Modifier.fillMaxSize(), energy = energy, animate = animate)
+    }
+}
+
+/** The one main action on a screen: white, quiet, unmistakable. */
+@Composable
+fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    Box(
+        modifier
             .fillMaxWidth()
+            .heightIn(min = 56.dp)
             .clip(Aura.ButtonShape)
-            .background(if (enabled) Aura.CtaGradient else Brush.linearGradient(listOf(Aura.LineBright, Aura.LineBright)))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 16.dp),
+            .background(if (enabled) Aura.Text else Aura.SurfaceHi)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            color = if (enabled) Aura.Void else Aura.TextFaint,
-            fontWeight = FontWeight.SemiBold,
-            style = MaterialTheme.typography.titleMedium,
-            textAlign = TextAlign.Center,
-        )
+        Text(text, style = MaterialTheme.typography.labelLarge, color = if (enabled) Aura.Bg else Aura.TextTertiary, textAlign = TextAlign.Center)
     }
 }
 
-/** Secondary action: outlined, quiet, never competes with the gradient. */
 @Composable
-fun AuraGhostButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    color: Color = Aura.TextDim,
-) {
+fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
-        modifier = modifier
+        modifier
             .fillMaxWidth()
+            .heightIn(min = 56.dp)
             .clip(Aura.ButtonShape)
-            .border(1.dp, Aura.LineBright, Aura.ButtonShape)
-            .clickable(onClick = onClick)
-            .padding(vertical = 15.dp),
+            .background(Aura.Surface)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = text, color = color, style = MaterialTheme.typography.bodyLarge)
+        Text(text, style = MaterialTheme.typography.labelLarge, color = Aura.Text, textAlign = TextAlign.Center)
     }
 }
 
-/** Grouped-list container: one rounded card holding hairline-separated rows. */
+/** Small lowercase heading over a group. */
 @Composable
-fun AuraCard(
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
+fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(text, style = MaterialTheme.typography.labelMedium, color = Aura.TextTertiary, modifier = modifier.padding(start = 4.dp, bottom = 8.dp))
+}
+
+/** A group of rows on one rounded surface. */
+@Composable
+fun Group(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Column(
         modifier
             .fillMaxWidth()
             .clip(Aura.CardShape)
-            .background(Aura.Surface)
-            .border(1.dp, Aura.Line, Aura.CardShape),
-    ) {
-        content()
-    }
+            .background(Aura.Surface),
+    ) { content() }
 }
 
-/** A settings row: label, optional value, optional chevron. */
+/** One row of a group. Tall enough to hit easily; the whole row is the target. */
 @Composable
-fun AuraRow(
-    label: String,
+fun SettingRow(
+    title: String,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     value: String? = null,
-    valueColor: Color = Aura.TextFaint,
-    showChevron: Boolean = true,
+    valueColor: Color = Aura.TextSecondary,
     divider: Boolean = true,
     onClick: (() -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
@@ -214,80 +180,75 @@ fun AuraRow(
         Row(
             Modifier
                 .fillMaxWidth()
+                .heightIn(min = 60.dp)
                 .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-                .padding(horizontal = 15.dp, vertical = 15.dp),
+                .padding(horizontal = 18.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(11.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = Aura.TextMid,
-                modifier = Modifier.weight(1f),
-            )
-            if (value != null) {
-                Text(text = value, style = MaterialTheme.typography.bodySmall, color = valueColor)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, color = Aura.Text)
+                subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             }
+            value?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = valueColor) }
             trailing?.invoke()
-            if (showChevron) {
-                Text("›", color = Aura.TextBarely, style = MaterialTheme.typography.bodyLarge)
-            }
+            if (onClick != null && trailing == null) Text("›", style = MaterialTheme.typography.titleLarge, color = Aura.TextTertiary)
         }
         if (divider) {
             Box(
                 Modifier
+                    .padding(start = 18.dp)
                     .fillMaxWidth()
-                    .padding(start = 15.dp)
-                    .background(Color(0xFF16161F))
-                    .size(height = 1.dp, width = Dp.Unspecified),
+                    .height(1.dp)
+                    .background(Aura.Line),
             )
         }
     }
 }
 
-/** Pill toggle matching the design's gradient-on / grey-off switch. */
+/** On/off switch. On glows in the aura's colours; off is plain. */
 @Composable
-fun AuraToggle(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
+fun Toggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+    val knob by animateFloatAsState(if (checked) 1f else 0f, tween(180), label = "knob")
+    val track by animateColorAsState(if (checked) Aura.Violet else Aura.Line, tween(180), label = "track")
     Box(
         modifier
-            .size(width = 40.dp, height = 24.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (checked) Aura.AccentGradient else Brush.linearGradient(listOf(Aura.LineBright, Aura.LineBright)))
-            .clickable { onCheckedChange(!checked) },
-        contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart,
+            .size(width = 50.dp, height = 30.dp)
+            .clip(Aura.PillShape)
+            .background(track)
+            .clickable(role = Role.Switch) { onCheckedChange(!checked) },
     ) {
         Box(
             Modifier
-                .padding(horizontal = 3.dp)
-                .size(18.dp)
-                .clip(RoundedCornerShape(9.dp))
-                .background(if (checked) Color.White else Aura.TextGhost),
+                .padding(3.dp)
+                .offset(x = 20.dp * knob)
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(Aura.Text),
         )
     }
 }
 
-/** Callout used for warnings and "good to know" notes. */
+/** A dot plus a few words: "ready", "needs permission". */
 @Composable
-fun AuraNote(
-    text: String,
-    modifier: Modifier = Modifier,
-    accent: Color = Aura.Warning,
-    marker: String = "◆",
-) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(accent.copy(alpha = 0.07f))
-            .border(1.dp, accent.copy(alpha = 0.22f), RoundedCornerShape(14.dp))
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text(marker, color = accent, style = MaterialTheme.typography.bodySmall)
-        Text(text, style = MaterialTheme.typography.bodySmall, color = Aura.TextDim)
+fun StatusLine(text: String, color: Color, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+        Text(text, style = MaterialTheme.typography.labelMedium, color = Aura.TextSecondary)
     }
+}
+
+/** Quiet explanatory text on a surface. */
+@Composable
+fun Note(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = Aura.TextSecondary,
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(Aura.CardShape)
+            .background(Aura.Surface)
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+    )
 }

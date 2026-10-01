@@ -35,6 +35,32 @@ enum class Language(
         fun fromTag(tag: String?): Language =
             entries.firstOrNull { it.tag.equals(tag, ignoreCase = true) } ?: English
 
+        /**
+         * The language a request is written in, from its script; null for Latin script
+         * (English, or Hindi typed in English letters — the caller decides).
+         * Devanagari is Hindi unless it has ळ, which is common in Marathi and rare in Hindi.
+         */
+        fun detect(text: String): Language? {
+            val counts = HashMap<Language, Int>()
+            for (ch in text) {
+                val lang = when (ch.code) {
+                    in 0x0900..0x097F -> Hindi
+                    in 0x0980..0x09FF -> Bengali
+                    in 0x0A00..0x0A7F -> Punjabi
+                    in 0x0A80..0x0AFF -> Gujarati
+                    in 0x0B00..0x0B7F -> Odia
+                    in 0x0B80..0x0BFF -> Tamil
+                    in 0x0C00..0x0C7F -> Telugu
+                    in 0x0C80..0x0CFF -> Kannada
+                    in 0x0D00..0x0D7F -> Malayalam
+                    else -> null
+                } ?: continue
+                counts[lang] = (counts[lang] ?: 0) + 1
+            }
+            val top = counts.maxByOrNull { it.value }?.key ?: return null
+            return if (top == Hindi && text.contains('ळ')) Marathi else top
+        }
+
         /** Maps a code Sarvam detected (either Odia spelling) back to a language. */
         fun fromSarvam(code: String?): Language? = entries.firstOrNull {
             it.sarvamCode.equals(code, true) || it.sarvamRealtimeCode.equals(code, true)

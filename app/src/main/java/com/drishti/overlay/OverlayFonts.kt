@@ -6,25 +6,22 @@ import androidx.core.content.res.ResourcesCompat
 import com.drishti.R
 
 /**
- * The design's typefaces for the overlay's plain Android views.
- *
- * Compose reads the font resources directly; these windows are built from Views, so they
- * need Typeface instances. Loaded once and cached — the overlay rebuilds its bubble on
- * every message and re-reading the font each time would be wasteful.
+ * Geist for the overlay's plain Android views (Compose reads the font resources directly).
+ * Loaded once and cached: the bubble is rebuilt on every message.
  */
 object OverlayFonts {
 
     @Volatile
-    private var display: Typeface? = null
+    private var regular: Typeface? = null
 
     @Volatile
-    private var mono: Typeface? = null
+    private var medium: Typeface? = null
 
     fun display(context: Context): Typeface =
-        display ?: load(context, R.font.space_grotesk, Typeface.SANS_SERIF).also { display = it }
+        regular ?: load(context, R.font.geist_regular, Typeface.SANS_SERIF).also { regular = it }
 
-    fun mono(context: Context): Typeface =
-        mono ?: load(context, R.font.ibm_plex_mono, Typeface.MONOSPACE).also { mono = it }
+    fun medium(context: Context): Typeface =
+        medium ?: load(context, R.font.geist_medium, Typeface.DEFAULT_BOLD).also { medium = it }
 
     private fun load(context: Context, resId: Int, fallback: Typeface): Typeface =
         runCatching { ResourcesCompat.getFont(context, resId) }.getOrNull() ?: fallback

@@ -41,25 +41,25 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
         setLayerType(LAYER_TYPE_SOFTWARE, null)
 
         tagView = TextView(context).apply {
-            textSize = 9.5f
-            setTextColor(Color.parseColor("#7EF2FF"))
-            letterSpacing = 0.14f
-            typeface = OverlayFonts.mono(context)
+            textSize = 13f
+            setTextColor(Color.parseColor("#A78BFA"))
+            typeface = OverlayFonts.medium(context)
             visibility = View.GONE
         }
         addView(tagView)
 
         messageView = TextView(context).apply {
-            textSize = 14.5f
-            setTextColor(Color.parseColor("#ECEAF5"))
-            setLineSpacing(dp(4f).toFloat(), 1f)
-            maxWidth = dp(250f)
+            // Large and high-contrast: this is the instruction they are following.
+            textSize = 17f
+            setTextColor(Color.parseColor("#F4F4F5"))
+            setLineSpacing(dp(3f).toFloat(), 1f)
+            maxWidth = dp(280f)
             typeface = OverlayFonts.display(context)
         }
         addView(
             messageView,
             LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(6f)
+                topMargin = dp(2f)
             },
         )
 
@@ -87,10 +87,11 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
         // One sentence at a time is a design rule, and it doubles as a safety net: no
         // stray provider payload can ever turn the bubble into a wall of text.
         messageView.text = message.trim().replace(Regex("\\s+"), " ").take(MAX_MESSAGE_CHARS)
-        if (tag.isNullOrBlank()) {
+        // Tags are for routing, not for show — only "listening" earns a visible label.
+        if (tag != "listening") {
             tagView.visibility = View.GONE
         } else {
-            tagView.text = tag.uppercase()
+            tagView.text = tag
             tagView.visibility = View.VISIBLE
         }
 
@@ -109,20 +110,16 @@ class BubbleCardView(context: Context) : LinearLayout(context) {
 
     private fun buildChip(chip: BubbleChip): View = TextView(context).apply {
         text = chip.label
-        textSize = 12.5f
-        typeface = OverlayFonts.display(context)
+        textSize = 15f
+        typeface = OverlayFonts.medium(context)
         gravity = Gravity.CENTER
-        setPadding(dp(14f), dp(10f), dp(14f), dp(10f))
-        setTextColor(
-            if (chip.primary) Color.parseColor("#7EF2FF") else Color.parseColor("#9C99B4"),
-        )
+        // At least 44dp tall: an easy target for an unsteady finger.
+        minHeight = dp(44f)
+        setPadding(dp(18f), dp(11f), dp(18f), dp(11f))
+        setTextColor(if (chip.primary) Color.parseColor("#09090B") else Color.parseColor("#F4F4F5"))
         background = ChipBackground(
             density = density,
-            border = if (chip.primary) {
-                Color.parseColor("#667EF2FF")
-            } else {
-                Color.parseColor("#FF2A2A3A")
-            },
+            fillColor = if (chip.primary) Color.parseColor("#F4F4F5") else Color.parseColor("#26262C"),
         )
         setOnClickListener { chip.onClick() }
         layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
@@ -144,16 +141,16 @@ private class BubbleBackground(private val density: Float) : Drawable() {
     private var tailOnRight = false
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#F00B0B13")
+        color = Color.parseColor("#F5141417")
         style = Paint.Style.FILL
     }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#527EF2FF")
+        color = Color.parseColor("#4DA78BFA")
         style = Paint.Style.STROKE
         strokeWidth = 1f * density
     }
     private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#4C6B4DFF")
+        color = Color.parseColor("#33818CF8")
         style = Paint.Style.FILL
         maskFilter = android.graphics.BlurMaskFilter(
             14f * density,
@@ -229,13 +226,13 @@ private class BubbleBackground(private val density: Float) : Drawable() {
 }
 
 /** Pill background for a chip. */
-private class ChipBackground(private val density: Float, border: Int) : Drawable() {
+private class ChipBackground(private val density: Float, fillColor: Int) : Drawable() {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#EB0B0B13")
+        color = fillColor
         style = Paint.Style.FILL
     }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = border
+        color = Color.TRANSPARENT
         style = Paint.Style.STROKE
         strokeWidth = 1f * density
     }
