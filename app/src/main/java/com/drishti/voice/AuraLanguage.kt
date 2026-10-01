@@ -28,6 +28,10 @@ enum class AuraLanguage(
     val locale: java.util.Locale
         get() = java.util.Locale.forLanguageTag(tag)
 
+    /** The same language as the agent and speech clients know it. */
+    val core: com.drishti.core.agent.Language
+        get() = com.drishti.core.agent.Language.fromTag(tag)
+
     companion object {
         fun fromTag(tag: String?): AuraLanguage =
             entries.firstOrNull { it.tag.equals(tag, ignoreCase = true) } ?: English
@@ -42,8 +46,6 @@ enum class SpeechProvider(val label: String) {
     /** Sarvam AI — strongest for Indian languages. */
     Sarvam("Sarvam"),
 
-    /** Deepgram — fast streaming transcription. */
-    Deepgram("Deepgram"),
     ;
 
     companion object {

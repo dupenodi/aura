@@ -2,58 +2,67 @@ package com.drishti.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
+import android.os.HandlerThread
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
-import java.util.concurrent.atomic.AtomicBoolean
+import com.drishti.core.agent.Screenshot
+import com.drishti.core.screen.Bounds
+import com.drishti.core.screen.Screen
+import com.drishti.core.screen.UiEvent
+import com.drishti.core.screen.UiNode
+import kotlinx.coroutines.android.asCoroutineDispatcher
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executor
+import kotlin.coroutines.resume
 
 /**
- * Accessibility service core — read-only tree collection and index resolution.
- * Algorithms ported from mobilerun-portal MobilerunAccessibilityService.
+ * Aura's eyes: reads the screen on demand and reports what the user does, as it happens.
+ *
+ * Read-only by design — nothing here taps, types or scrolls. Two jobs:
+ *
+ * - **Events.** Clicks, text changes, scrolls and window changes are forwarded the moment
+ *   they arrive, with the bounds of the node that was pressed. That is how a guided step is
+ *   known to be done: the click landed on what we ringed.
+ * - **Snapshots.** The tree is read only when the agent asks, on a background thread, and
+ *   copied into plain data. (It used to be re-walked on the main thread every 250ms for as
+ *   long as the service was on, which cost battery and frames for nothing.)
  */
 class ScreenAgentAccessibilityService : AccessibilityService() {
 
     companion object {
         const val TAG = "ScreenAgentA11y"
-        private const val MIN_ELEMENT_SIZE = 5
-        internal const val VISIBLE_ELEMENTS_STALE_GRACE_MS = 750L
-        private const val REFRESH_INTERVAL_MS = 250L
-        private const val MIN_FRAME_TIME_MS = 16L
+        private const val MAX_NODES = 2_500
+        private const val MAX_DEPTH = 60
+        private const val SHOT_WIDTH = 720
+        private const val SHOT_QUALITY = 70
 
         @Volatile
         private var instance: ScreenAgentAccessibilityService? = null
 
         fun getInstance(): ScreenAgentAccessibilityService? = instance
 
-        internal fun shouldReuseVisibleElementsSnapshot(
-            cachedElementCount: Int,
-            snapshotTimeMs: Long,
-            nowMs: Long,
-            snapshotPackageName: String,
-            currentPackageName: String,
-            snapshotActivityName: String,
-            currentActivityName: String,
-            snapshotScreenWidth: Int,
-            currentScreenWidth: Int,
-            snapshotScreenHeight: Int,
-            currentScreenHeight: Int,
-        ): Boolean {
-            val snapshotAgeMs = nowMs - snapshotTimeMs
-            return cachedElementCount > 0 &&
-                snapshotTimeMs > 0L &&
-                snapshotAgeMs in 0L..VISIBLE_ELEMENTS_STALE_GRACE_MS &&
-                snapshotPackageName == currentPackageName &&
-                snapshotActivityName == currentActivityName &&
-                snapshotScreenWidth == currentScreenWidth &&
-                snapshotScreenHeight == currentScreenHeight
-        }
+        /**
+         * Everything the platform reports, for as long as Aura runs. Lives outside the service
+         * instance so collectors survive the service being restarted by the system.
+         */
+        private val _events = MutableSharedFlow<UiEvent>(
+            extraBufferCapacity = 512,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
+        val events: SharedFlow<UiEvent> = _events
 
         /**
          * Whether an event says anything about which app is in front.
@@ -69,495 +78,294 @@ class ScreenAgentAccessibilityService : AccessibilityService() {
         ): Boolean = eventPackage.isNotEmpty() &&
             eventPackage != ownPackage &&
             eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-
-        internal fun updateScreenBounds(bounds: Rect, width: Int, height: Int): Boolean {
-            val safeWidth = width.coerceAtLeast(0)
-            val safeHeight = height.coerceAtLeast(0)
-            val changed = bounds.left != 0 ||
-                bounds.top != 0 ||
-                bounds.right != safeWidth ||
-                bounds.bottom != safeHeight
-            bounds.left = 0
-            bounds.top = 0
-            bounds.right = safeWidth
-            bounds.bottom = safeHeight
-            return changed
-        }
     }
 
-    private val screenBounds = Rect()
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val isProcessing = AtomicBoolean(false)
-    private var lastUpdateTime = 0L
-    @Volatile
-    private var currentPackageName: String = ""
+    private val worker = HandlerThread("aura-a11y").apply { start() }
+    private val workerHandler = Handler(worker.looper)
+    private val workerDispatcher = workerHandler.asCoroutineDispatcher()
+    private val workerExecutor = Executor { workerHandler.post(it) }
 
     @Volatile
-    private var currentActivityName: String = ""
+    private var foregroundPackage: String = ""
 
-    /**
-     * Package owning the active window, read from the tree itself rather than from events.
-     * Events also arrive from keyboards, the status bar and our own overlay windows, so
-     * they are a poor answer to "which app is the user actually in".
-     */
     @Volatile
-    private var activeWindowPackageName: String = ""
-    private val visibleElements = mutableListOf<ElementNode>()
-    private var visibleElementsSnapshotTimeMs = 0L
-    private var visibleElementsSnapshotPackageName = ""
-    private var visibleElementsSnapshotActivityName = ""
-    private var visibleElementsSnapshotScreenWidth = 0
-    private var visibleElementsSnapshotScreenHeight = 0
+    private var foregroundActivity: String? = null
 
-    /**
-     * Overlay indexes last published to the agent. Tap/type by index resolve against this map so
-     * actions stay consistent with the tree the model saw, even if the live tree reindexes.
-     */
-    private val publishedBounds = mutableMapOf<Int, Rect>()
-    private var publishedPackageName: String = ""
-
-    private val updateRunnable = object : Runnable {
-        override fun run() {
-            val currentTime = System.currentTimeMillis()
-            val timeSinceLastUpdate = currentTime - lastUpdateTime
-            if (timeSinceLastUpdate >= MIN_FRAME_TIME_MS) {
-                refreshVisibleElements()
-                lastUpdateTime = currentTime
-            }
-            mainHandler.postDelayed(this, REFRESH_INTERVAL_MS)
-        }
-    }
+    /** Live nodes from the latest snapshot, by key, so bounds can be re-read just before pointing. */
+    private var liveNodes: Map<Int, AccessibilityNodeInfo> = emptyMap()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        // Amend the manifest config rather than replacing it. A fresh
-        // AccessibilityServiceInfo dropped flagIncludeNotImportantViews, losing the
-        // untagged containers that much of the tree hangs off.
-        //
-        // Touch exploration is deliberately not requested: it makes a single tap announce
-        // rather than activate, which would stop the user completing the very step we just
-        // pointed them at.
+        // Amend the manifest config rather than replacing it: a fresh AccessibilityServiceInfo
+        // drops flagIncludeNotImportantViews, losing the untagged containers much of the tree
+        // hangs off. Touch exploration is deliberately not requested — it would make a tap
+        // announce instead of activate, blocking the very step we pointed at.
         serviceInfo = (serviceInfo ?: AccessibilityServiceInfo()).apply {
             packageNames = null
-            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = flags or
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
                 AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
         }
-        refreshScreenBounds()
-        startPeriodicUpdates()
-        Log.d(TAG, "Accessibility service connected")
+        Log.d(TAG, "connected")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        val eventPackage = event.packageName?.toString() ?: ""
-        val eventClassName = event.className?.toString() ?: ""
+        val pkg = event.packageName?.toString().orEmpty()
+        // Our own windows (orb, bubble, ring) are never the user doing something.
+        if (pkg == packageName) return
 
-        // Our own overlays raise events like any other window. Letting them through flipped
-        // the tracked package to com.drishti the instant a highlight was drawn, which the
-        // guidance loop read as "they navigated somewhere" and moved on without them.
-        if (!isForegroundPackageSignal(eventPackage, event.eventType, packageName)) return
+        if (isForegroundPackageSignal(pkg, event.eventType, packageName)) {
+            foregroundPackage = pkg
+            event.className?.toString()?.takeIf { !it.startsWith("android.") }?.let { foregroundActivity = it }
+        }
 
-        if (eventPackage != currentPackageName && currentPackageName.isNotEmpty()) {
-            synchronized(visibleElements) { clearVisibleElementSnapshot() }
+        val type = when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_CLICKED -> UiEvent.Type.CLICK
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> UiEvent.Type.LONG_CLICK
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> UiEvent.Type.TEXT_CHANGED
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> UiEvent.Type.SCROLLED
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> UiEvent.Type.WINDOW_STATE
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> UiEvent.Type.WINDOWS_CHANGED
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> UiEvent.Type.CONTENT_CHANGED
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> UiEvent.Type.FOCUSED
+            AccessibilityEvent.TYPE_VIEW_SELECTED -> UiEvent.Type.SELECTED
+            else -> return
         }
-        currentPackageName = eventPackage
-        if (eventClassName.isNotEmpty() && !eventClassName.startsWith("android.")) {
-            currentActivityName = eventClassName
+
+        // Only user actions need the pressed node; content changes fire constantly and
+        // fetching their source would be wasted IPC.
+        val wantsSource = type == UiEvent.Type.CLICK || type == UiEvent.Type.LONG_CLICK ||
+            type == UiEvent.Type.FOCUSED || type == UiEvent.Type.SELECTED
+        var bounds: Bounds? = null
+        var viewId: String? = null
+        var srcText: String? = null
+        var srcDesc: String? = null
+        if (wantsSource) {
+            runCatching {
+                event.source?.let { src ->
+                    val r = Rect()
+                    src.getBoundsInScreen(r)
+                    bounds = Bounds(r.left, r.top, r.right, r.bottom)
+                    viewId = src.viewIdResourceName?.substringAfterLast('/')
+                    srcText = src.text?.toString()
+                    srcDesc = src.contentDescription?.toString()
+                }
+            }
         }
-        // Tree refresh is periodic (250ms), not event-driven — portal behavior.
+        val text = when (type) {
+            // The new contents of the field, which is what a typing step compares against.
+            UiEvent.Type.TEXT_CHANGED -> event.text?.joinToString("")
+            else -> event.text?.joinToString(" ")?.takeIf { it.isNotBlank() } ?: srcText
+        }
+        _events.tryEmit(
+            UiEvent(
+                type = type,
+                pkg = pkg,
+                cls = event.className?.toString()?.substringAfterLast('.'),
+                text = text,
+                desc = event.contentDescription?.toString() ?: srcDesc,
+                viewId = viewId,
+                bounds = bounds,
+                timeMs = event.eventTime,
+            ),
+        )
     }
 
-    override fun onInterrupt() {}
-
-    override fun onDestroy() {
-        stopPeriodicUpdates()
-        clearVisibleElementSnapshot()
-        if (instance === this) instance = null
-        super.onDestroy()
-    }
+    override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
-        stopPeriodicUpdates()
-        clearVisibleElementSnapshot()
         if (instance === this) instance = null
         return super.onUnbind(intent)
     }
 
-    /**
-     * The app the user is actually looking at.
-     *
-     * Prefers the active window's own package. Event packages are a fallback only: they
-     * also come from keyboards, the status bar and our own overlay, and trusting them here
-     * both defeated the sensitive-app check and made the guidance loop believe the user had
-     * navigated away.
-     */
-    fun currentPackage(): String = activeWindowPackageName.ifEmpty { currentPackageName }
+    override fun onDestroy() {
+        if (instance === this) instance = null
+        worker.quitSafely()
+        super.onDestroy()
+    }
 
-    fun getVisibleElements(): MutableList<ElementNode> = getVisibleElementsInternal()
+    // ---- Snapshot ---------------------------------------------------------------------------
 
-    /**
-     * Refresh the tree and pin overlay indexes for subsequent agent actions.
-     * Always call this when building the observe payload for the model.
-     */
-    fun captureAgentTree(): MutableList<ElementNode> {
-        val elements = getVisibleElementsInternal()
-        val map = mutableMapOf<Int, Rect>()
-        for (root in elements) {
-            for (node in root.flatten()) {
-                if (node.overlayIndex > 0) {
-                    map[node.overlayIndex] = Rect(node.rect)
-                }
+    /** Reads the screen the user is looking at. Null if nothing can be read right now. */
+    suspend fun snapshot(): Screen? = withContext(workerDispatcher) {
+        runCatching { readScreen() }.onFailure { Log.w(TAG, "snapshot failed", it) }.getOrNull()
+    }
+
+    /** Where a node from the last snapshot is now — lists settle, keyboards push things up. */
+    suspend fun liveBounds(key: Int): Bounds? = withContext(workerDispatcher) {
+        val node = liveNodes[key] ?: return@withContext null
+        runCatching {
+            if (!node.refresh()) return@runCatching null
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            if (r.isEmpty || !node.isVisibleToUser) null else Bounds(r.left, r.top, r.right, r.bottom)
+        }.getOrNull()
+    }
+
+    private fun readScreen(): Screen? {
+        val (root, window) = activeRoot() ?: return null
+        val pkg = root.packageName?.toString().orEmpty()
+        val size = screenSize()
+        val nodes = HashMap<Int, AccessibilityNodeInfo>()
+        var count = 0
+
+        fun convert(node: AccessibilityNodeInfo, depth: Int): UiNode? {
+            if (count >= MAX_NODES || depth > MAX_DEPTH) return null
+            if (!node.isVisibleToUser) return null
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            val key = count++
+            nodes[key] = node
+            val children = ArrayList<UiNode>(node.childCount)
+            for (i in 0 until node.childCount) {
+                val child = runCatching { node.getChild(i) }.getOrNull() ?: continue
+                convert(child, depth + 1)?.let(children::add)
             }
-        }
-        synchronized(visibleElements) {
-            publishedBounds.clear()
-            publishedBounds.putAll(map)
-            publishedPackageName = currentPackageName
-        }
-        return elements
-    }
-
-    /**
-     * Resolve an overlay index without rebuilding the tree.
-     * Prefers the live cached node; falls back to bounds from the last [captureAgentTree].
-     */
-    fun findElementByIndex(index: Int): ElementNode? {
-        synchronized(visibleElements) {
-            for (root in visibleElements) {
-                val found = root.findByOverlayIndex(index)
-                if (found != null) return found
-            }
-        }
-        return null
-    }
-
-    data class TapTarget(val bounds: Rect, val element: ElementNode?)
-
-    fun resolveTapTarget(index: Int): TapTarget? {
-        val live = findElementByIndex(index)
-        if (live != null) return TapTarget(freshBoundsOf(live), live)
-        synchronized(visibleElements) {
-            if (publishedPackageName.isNotEmpty() &&
-                publishedPackageName != currentPackageName
-            ) {
-                return null
-            }
-            val published = publishedBounds[index] ?: return null
-            return TapTarget(Rect(published), null)
-        }
-    }
-
-    /**
-     * Bounds captured while scanning the tree go stale as soon as the UI moves — a list
-     * settling, a keyboard opening, a transition finishing. Acting on those coordinates
-     * draws the highlight (and taps) in the wrong place, so re-read them from the live
-     * node and only fall back to the scan-time rect if that fails.
-     */
-    private fun freshBoundsOf(element: ElementNode): Rect {
-        return try {
-            element.nodeInfo.refresh()
-            val refreshed = Rect()
-            element.nodeInfo.getBoundsInScreen(refreshed)
-            if (refreshed.isEmpty) Rect(element.rect) else refreshed
-        } catch (e: Exception) {
-            Log.w(TAG, "Bounds refresh failed for index ${element.overlayIndex}: ${e.message}")
-            Rect(element.rect)
-        }
-    }
-
-    private fun startPeriodicUpdates() {
-        lastUpdateTime = System.currentTimeMillis()
-        mainHandler.postDelayed(updateRunnable, REFRESH_INTERVAL_MS)
-    }
-
-    private fun stopPeriodicUpdates() {
-        mainHandler.removeCallbacks(updateRunnable)
-    }
-
-    private fun refreshVisibleElements() {
-        if (!isProcessing.compareAndSet(false, true)) return
-        try {
-            if (currentPackageName.isEmpty()) {
-                clearVisibleElementSnapshot()
-                return
-            }
-            getVisibleElementsInternal()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error refreshing visible elements: ${e.message}", e)
-        } finally {
-            isProcessing.set(false)
-        }
-    }
-
-    private fun getVisibleElementsInternal(): MutableList<ElementNode> {
-        val elements = mutableListOf<ElementNode>()
-        val indexCounter = IndexCounter(1)
-        val screenBoundsSnapshot = refreshScreenBounds()
-
-        val rootCandidates = collectRootCandidates()
-        if (rootCandidates.isEmpty()) {
-            synchronized(visibleElements) {
-                if (shouldReuseVisibleElementsSnapshot(
-                        cachedElementCount = visibleElements.size,
-                        snapshotTimeMs = visibleElementsSnapshotTimeMs,
-                        nowMs = SystemClock.elapsedRealtime(),
-                        snapshotPackageName = visibleElementsSnapshotPackageName,
-                        currentPackageName = currentPackageName,
-                        snapshotActivityName = visibleElementsSnapshotActivityName,
-                        currentActivityName = currentActivityName,
-                        snapshotScreenWidth = visibleElementsSnapshotScreenWidth,
-                        currentScreenWidth = screenBoundsSnapshot.width(),
-                        snapshotScreenHeight = visibleElementsSnapshotScreenHeight,
-                        currentScreenHeight = screenBoundsSnapshot.height(),
-                    )
-                ) {
-                    return visibleElements.toMutableList()
-                }
-                clearVisibleElementSnapshot()
-                return mutableListOf()
-            }
-        }
-
-        try {
-            for ((rootNode, layer) in rootCandidates) {
-                collectVisibleElements(
-                    rootNode,
-                    layer,
-                    null,
-                    elements,
-                    indexCounter,
-                    screenBoundsSnapshot,
-                )
-            }
-        } finally {
-            rootCandidates.forEach { (node, _) -> node.recycle() }
-        }
-
-        synchronized(visibleElements) {
-            clearVisibleElementSnapshot()
-            visibleElements.addAll(elements)
-            visibleElementsSnapshotTimeMs = SystemClock.elapsedRealtime()
-            visibleElementsSnapshotPackageName = currentPackageName
-            visibleElementsSnapshotActivityName = currentActivityName
-            visibleElementsSnapshotScreenWidth = screenBoundsSnapshot.width()
-            visibleElementsSnapshotScreenHeight = screenBoundsSnapshot.height()
-        }
-        return elements
-    }
-
-    private fun collectRootCandidates(): List<Pair<AccessibilityNodeInfo, Int>> {
-        val activeRoot = try {
-            rootInActiveWindow
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "Unable to read active accessibility root: ${e.message}", e)
-            null
-        }
-        activeRoot?.let {
-            noteActiveWindowPackage(it)
-            return listOf(it to 0)
-        }
-
-        val windows = try {
-            windows
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "Unable to read accessibility windows: ${e.message}", e)
-            null
-        } ?: return emptyList()
-
-        val out = mutableListOf<Pair<AccessibilityNodeInfo, Int>>()
-        try {
-            windows.sortedWith(
-                compareBy<AccessibilityWindowInfo> { fallbackWindowTypePriority(it) }
-                    .thenByDescending { it.layer },
+            return UiNode(
+                cls = node.className?.toString()?.substringAfterLast('.').orEmpty(),
+                text = node.text?.toString(),
+                desc = node.contentDescription?.toString(),
+                hint = node.hintText?.toString(),
+                viewId = node.viewIdResourceName?.substringAfterLast('/'),
+                state = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) node.stateDescription?.toString() else null,
+                bounds = Bounds(r.left, r.top, r.right, r.bottom),
+                flags = flagsOf(node),
+                children = children,
+                key = key,
             )
-                .filter { isUserFacingWindow(it) }
-                .forEach { window ->
-                    val root = try {
-                        window.root
-                    } catch (e: RuntimeException) {
-                        Log.e(TAG, "Unable to read window root: ${e.message}", e)
-                        null
-                    }
-                    if (root != null) {
-                        if (out.isEmpty()) noteActiveWindowPackage(root)
-                        out.add(root to window.layer)
-                    }
-                }
-        } finally {
-            windows.forEach { it.recycle() }
         }
-        return out
+
+        val tree = convert(root, 0) ?: return null
+        liveNodes = nodes
+        val keyboard = runCatching { windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } }.getOrDefault(false)
+        val title = window?.title?.toString()?.takeIf { it.isNotBlank() }
+            ?: (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) root.paneTitle?.toString() else null)
+        return Screen(
+            pkg = pkg,
+            width = size.x,
+            height = size.y,
+            roots = listOf(tree),
+            appLabel = appLabel(pkg),
+            activity = foregroundActivity.takeIf { pkg == foregroundPackage },
+            title = title?.takeIf { it != appLabel(pkg) },
+            keyboardVisible = keyboard,
+            timeMs = android.os.SystemClock.uptimeMillis(),
+        )
     }
 
     /**
-     * Records which app owns the tree we are about to read. Our own package is ignored: the
-     * orb and the highlight are ours, and neither means the user left the app they are in.
+     * The window the user is working in. Normally the active window; when that is one of our
+     * own (the composer has focus), the topmost application window that isn't ours.
      */
-    private fun noteActiveWindowPackage(root: AccessibilityNodeInfo) {
-        val pkg = try {
-            root.packageName?.toString().orEmpty()
-        } catch (e: RuntimeException) {
-            Log.w(TAG, "Unable to read active window package: ${e.message}")
-            ""
+    private fun activeRoot(): Pair<AccessibilityNodeInfo, AccessibilityWindowInfo?>? {
+        val all = runCatching { windows }.getOrNull().orEmpty()
+        val active = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                getRootInActiveWindow(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID)
+            } else {
+                rootInActiveWindow
+            }
+        }.getOrNull()
+        if (active != null && active.packageName?.toString() != packageName) {
+            return active to all.firstOrNull { it.id == active.windowId }
         }
-        if (pkg.isNotEmpty() && pkg != packageName) activeWindowPackageName = pkg
+        val fallback = all
+            .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION || it.type == AccessibilityWindowInfo.TYPE_SYSTEM }
+            .sortedByDescending { it.layer }
+            .firstNotNullOfOrNull { w -> w.root?.takeIf { it.packageName?.toString() != packageName }?.let { it to w } }
+        return fallback
     }
 
-    private fun isUserFacingWindow(window: AccessibilityWindowInfo): Boolean =
-        window.type == AccessibilityWindowInfo.TYPE_APPLICATION ||
-            window.type == AccessibilityWindowInfo.TYPE_SYSTEM
-
-    private fun fallbackWindowTypePriority(window: AccessibilityWindowInfo): Int =
-        when (window.type) {
-            AccessibilityWindowInfo.TYPE_APPLICATION -> 0
-            AccessibilityWindowInfo.TYPE_SYSTEM -> 1
-            else -> 2
+    private fun flagsOf(n: AccessibilityNodeInfo): Int {
+        var f = 0
+        if (n.isClickable) f = f or UiNode.CLICKABLE
+        if (n.isLongClickable) f = f or UiNode.LONG_CLICKABLE
+        if (n.isEditable) f = f or UiNode.EDITABLE
+        if (n.isScrollable) f = f or UiNode.SCROLLABLE
+        if (n.isCheckable) f = f or UiNode.CHECKABLE
+        if (n.isChecked) f = f or UiNode.CHECKED
+        if (n.isSelected) f = f or UiNode.SELECTED
+        if (!n.isEnabled) f = f or UiNode.DISABLED
+        if (n.isFocused) f = f or UiNode.FOCUSED
+        if (n.isPassword) f = f or UiNode.PASSWORD
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && n.isHeading) f = f or UiNode.HEADING
+        if (n.isScrollable) {
+            val actions = n.actionList
+            if (actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD }) f = f or UiNode.SCROLL_FORWARD
+            if (actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD }) f = f or UiNode.SCROLL_BACKWARD
         }
-
-    private fun collectVisibleElements(
-        node: AccessibilityNodeInfo,
-        windowLayer: Int,
-        parent: ElementNode?,
-        rootElements: MutableList<ElementNode>,
-        indexCounter: IndexCounter,
-        screenBoundsSnapshot: Rect,
-        depth: Int = 0,
-        activeNodePath: MutableSet<AccessibilityNodeInfo> = mutableSetOf(),
-    ) {
-        try {
-            val rect = Rect()
-            node.getBoundsInScreen(rect)
-            val nodeKey = AccessibilityTraversalGuard.createTraversalKey(node, rect)
-
-            if (AccessibilityTraversalGuard.isTooDeep(depth)) {
-                Log.w(TAG, "Skipping subtree deeper than max depth: $nodeKey")
-                return
-            }
-            if (!AccessibilityTraversalGuard.enterActivePath(node, activeNodePath)) {
-                Log.w(TAG, "Skipping cyclic accessibility node: $nodeKey")
-                return
-            }
-
-            try {
-                val isInScreen = Rect.intersects(rect, screenBoundsSnapshot)
-                val hasSize = rect.width() > MIN_ELEMENT_SIZE && rect.height() > MIN_ELEMENT_SIZE
-                var currentElement: ElementNode? = null
-
-                if (isInScreen && hasSize) {
-                    val text = node.text?.toString() ?: ""
-                    val contentDesc = node.contentDescription?.toString() ?: ""
-                    val className = node.className?.toString() ?: ""
-                    val viewId = node.viewIdResourceName ?: ""
-                    val displayText = when {
-                        text.isNotEmpty() -> text
-                        contentDesc.isNotEmpty() -> contentDesc
-                        viewId.isNotEmpty() -> viewId.substringAfterLast('/')
-                        else -> className.substringAfterLast('.')
-                    }
-                    val id = ElementNode.createId(rect, className.substringAfterLast('.'), displayText)
-                    val nodeCopy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        AccessibilityNodeInfo(node)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        AccessibilityNodeInfo.obtain(node)
-                    }
-                    currentElement = ElementNode(
-                        nodeCopy,
-                        Rect(rect),
-                        displayText,
-                        className.substringAfterLast('.'),
-                        windowLayer,
-                        System.currentTimeMillis(),
-                        id,
-                    )
-                    currentElement.overlayIndex = indexCounter.getNext()
-                    if (parent != null) {
-                        parent.addChild(currentElement)
-                    } else {
-                        rootElements.add(currentElement)
-                    }
-                }
-
-                val childParent = currentElement ?: parent
-                val childCount = try {
-                    node.childCount
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "Unable to read child count: ${e.message}", e)
-                    0
-                }
-                for (i in 0 until childCount) {
-                    val childNode = try {
-                        node.getChild(i)
-                    } catch (e: RuntimeException) {
-                        Log.e(TAG, "Unable to read child $i: ${e.message}", e)
-                        null
-                    } ?: continue
-
-                    if (childNode === node) continue
-                    if (AccessibilityTraversalGuard.isActiveNodeReference(childNode, activeNodePath)) {
-                        continue
-                    }
-                    try {
-                        collectVisibleElements(
-                            childNode,
-                            windowLayer,
-                            childParent,
-                            rootElements,
-                            indexCounter,
-                            screenBoundsSnapshot,
-                            depth + 1,
-                            activeNodePath,
-                        )
-                    } finally {
-                        childNode.recycle()
-                    }
-                }
-            } finally {
-                AccessibilityTraversalGuard.leaveActivePath(node, activeNodePath)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in collectVisibleElements: ${e.message}", e)
-        }
+        return f
     }
 
-    private fun refreshScreenBounds(): Rect {
-        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            updateScreenBounds(screenBounds, bounds.width(), bounds.height())
+    private val labels = HashMap<String, String?>()
+
+    private fun appLabel(pkg: String): String? = labels.getOrPut(pkg) {
+        runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        }.getOrNull()
+    }
+
+    private fun screenSize(): android.graphics.Point {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = wm.currentWindowMetrics.bounds
+            android.graphics.Point(b.width(), b.height())
         } else {
-            val metrics = android.util.DisplayMetrics()
+            val m = android.util.DisplayMetrics()
             @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.getRealMetrics(metrics)
-            updateScreenBounds(screenBounds, metrics.widthPixels, metrics.heightPixels)
+            wm.defaultDisplay.getRealMetrics(m)
+            android.graphics.Point(m.widthPixels, m.heightPixels)
         }
-        return Rect(screenBounds)
     }
 
-    private fun clearElementList() {
-        for (element in visibleElements) {
-            try {
-                element.nodeInfo.recycle()
-            } catch (_: Exception) {
+    // ---- Screenshot -------------------------------------------------------------------------
+
+    /**
+     * A downscaled JPEG of the app the user is in, for screens the tree can't describe.
+     * On Android 14+ only that app's window is captured, so Aura's own orb and ring never
+     * appear in the picture the model sees.
+     */
+    suspend fun screenshot(): Screenshot? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val bitmap = suspendCancellableCoroutine<Bitmap?> { cont ->
+            val callback = object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val bmp = runCatching {
+                        result.hardwareBuffer.use { hw ->
+                            Bitmap.wrapHardwareBuffer(hw, result.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                        }
+                    }.getOrNull()
+                    if (cont.isActive) cont.resume(bmp)
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    Log.w(TAG, "screenshot failed: $errorCode")
+                    if (cont.isActive) cont.resume(null)
+                }
+            }
+            val windowId = runCatching { rootInActiveWindow?.windowId }.getOrNull()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && windowId != null) {
+                takeScreenshotOfWindow(windowId, workerExecutor, callback)
+            } else {
+                takeScreenshot(Display.DEFAULT_DISPLAY, workerExecutor, callback)
+            }
+        } ?: return null
+        return withContext(workerDispatcher) {
+            val scale = SHOT_WIDTH.toFloat() / bitmap.width
+            val scaled = if (scale < 1f) {
+                Bitmap.createScaledBitmap(bitmap, SHOT_WIDTH, (bitmap.height * scale).toInt(), true)
+            } else {
+                bitmap
+            }
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, SHOT_QUALITY, out)
+            Screenshot(out.toByteArray(), scaled.width, scaled.height).also {
+                if (scaled !== bitmap) scaled.recycle()
+                bitmap.recycle()
             }
         }
-        visibleElements.clear()
-    }
-
-    private fun clearVisibleElementSnapshot() {
-        clearElementList()
-        visibleElementsSnapshotTimeMs = 0L
-        visibleElementsSnapshotPackageName = ""
-        visibleElementsSnapshotActivityName = ""
-        visibleElementsSnapshotScreenWidth = 0
-        visibleElementsSnapshotScreenHeight = 0
-    }
-
-    private class IndexCounter(private var current: Int = 1) {
-        fun getNext(): Int = current++
     }
 }

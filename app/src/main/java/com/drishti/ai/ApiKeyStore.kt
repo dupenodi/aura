@@ -25,7 +25,7 @@ object ApiKeyStore {
         val keyName = prefKey(provider)
         val ctx = appContext
         if (ctx != null) {
-            val stored = prefs(ctx).getString(keyName, null)
+            val stored = runCatching { prefs(ctx).getString(keyName, null) }.getOrNull()
             if (!stored.isNullOrBlank()) return stored
         }
         return when (provider.lowercase()) {
@@ -34,6 +34,7 @@ object ApiKeyStore {
             "openrouter" -> BuildConfig.OPENROUTER_API_KEY
             "gemini" -> BuildConfig.GEMINI_API_KEY
             "local" -> BuildConfig.LOCAL_LLM_API_KEY
+            "sarvam" -> BuildConfig.SARVAM_API_KEY
             else -> ""
         }
     }
@@ -48,7 +49,15 @@ object ApiKeyStore {
 
     private fun prefKey(provider: String) = "${provider.lowercase()}_api_key"
 
-    private fun prefs(context: Context) =
+    // Encrypted prefs cost a Keystore round trip to open; open once, not on every lookup
+    // (resolve() runs on every model call and every spoken line).
+    @Volatile
+    private var cachedPrefs: android.content.SharedPreferences? = null
+
+    private fun prefs(context: Context): android.content.SharedPreferences =
+        cachedPrefs ?: synchronized(this) { cachedPrefs ?: openPrefs(context).also { cachedPrefs = it } }
+
+    private fun openPrefs(context: Context) =
         EncryptedSharedPreferences.create(
             context,
             PREFS,

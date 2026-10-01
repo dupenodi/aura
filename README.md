@@ -1,78 +1,76 @@
-# Drishti
+# Aura (Drishti)
 
-On-device Android screen assistant POC. Aura **shows** the user how to do things: it reads the accessibility tree (indexing ported in-process from [mobilerun-portal](https://github.com/droidrun/mobilerun-portal) — **not** a droidrun dependency), and an LLM loop picks the single next step, moves a cursor onto it, and waits for the user's own finger. It never taps, types or swipes for them.
+Aura is a floating orb on Android that **shows** people how to do things on their own phone.
+Ask it — by voice, in any of 11 Indian languages, or by typing — and it rings the one thing to
+press, says what to do, and waits for the person's own finger. It never taps, types or swipes
+for them. When they press the wrong thing it carries on from wherever they ended up; when they
+hesitate it repeats, reassures, then waits instead of giving up.
 
-<img width="240" height="533" alt="Aura-ezgif com-resize" src="https://github.com/user-attachments/assets/f8063d08-7c12-4d2d-a8c0-5513c7bb4664" />
-
-
-> **POC only.** API keys live on-device (`local.properties` → BuildConfig, optional EncryptedSharedPreferences). Move keys behind a backend proxy before any real distribution.
-
-## LLM providers
-
-Set in `local.properties` (see `local.properties.example`):
-
-| Key | Purpose |
-|-----|---------|
-| `LLM_PROVIDER` | `auto` (default), or force `local` / `openrouter` / `anthropic` / `openai` |
-| `LOCAL_LLM_BASE_URL` | OpenAI-compatible base, e.g. `http://127.0.0.1:11434/v1` |
-| `LOCAL_LLM_MODEL` | Model id for local server |
-| `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | OpenRouter |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | Anthropic Messages API |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI Chat Completions |
-
-**Auto** tries, in order: **local → openrouter → anthropic → openai** (skips anything not configured). Failures fall through to the next provider.
-
-### Local inference (Ollama / LM Studio)
+## Build and install
 
 ```bash
-# On the host
-ollama serve   # or start LM Studio server on :1234
-
-# USB phone → host port (recommended)
-adb reverse tcp:11434 tcp:11434
-
-# local.properties
-LOCAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
-LOCAL_LLM_MODEL=llama3.2
-LLM_PROVIDER=local   # or leave as auto
-```
-
-Emulator: use `http://10.0.2.2:11434/v1`. Same Wi‑Fi: use your machine’s LAN IP.
-
-## Build & install
-
-```bash
+cp local.properties.example local.properties   # add OPENROUTER_API_KEY and SARVAM_API_KEY
 ./gradlew installDebug
 ```
 
-## Permissions
+Then open Aura and grant: **Accessibility** (Settings → Accessibility → Aura; on Android 13+ a
+sideloaded app first needs App info → ⋮ → *Allow restricted settings*), **Display over other
+apps**, and **Microphone**.
 
-1. **Accessibility** — Settings → Accessibility → Drishti → On  
-2. **Display over other apps** — grant for `com.drishti`  
-3. **Microphone** — for voice input  
+## How it works
 
-Then open Drishti → **Show summon bubble**.
+```
+:core  (plain Kotlin — builds and tests anywhere, no Android SDK)
+  screen/   ScreenEncoder: accessibility tree → ~100-token list of pressable things, by reference
+  agent/    GuideSession: observe → plan one step → show → watch the user → repeat
+            StepResolver, Prompts, Phrases (fixed lines in 11 languages), SensitiveApps
+  llm/      OpenRouter / OpenAI-compatible and Anthropic clients: one forced tool call per step,
+            prompt caching, provider-side fallback, timeouts
+  speech/   Sarvam realtime STT (saaras:v4, hold-to-talk) and streaming TTS (bulbul:v3)
+  sim/      A simulated Pixel 6 (Settings, WhatsApp, YouTube, Phone, Clock), a scripted user,
+            golden tasks — the test bed for everything above
+:app   (Android)
+  accessibility/  event stream + on-demand snapshots + screenshots, read-only
+  agent/          GuideRunner, AndroidDevice
+  overlay/        orb, speech bubble, ring/cursor/swipe hint
+  voice/          AuraVoice (Sarvam → on-device TTS), hold-to-talk (Sarvam realtime → REST → on-device)
+```
 
-## Using the bubble
+A step is done when the platform reports a click on the node Aura ringed (or, for apps that
+report no clicks, when the screen changes accordingly). Each step is one small model call:
+the system prompt (rules, language, installed apps) is identical all session and cached, and
+the per-step message is the task, a short history and the current screen.
 
-- **Tap** → type what you need help with
-- **Hold** → say it instead; release to send
-- **Drag** → park the orb at either edge
+## Testing
 
-Each step dims the screen, rings the one thing to press, glides the cursor onto it and says
-what to do. The next step only comes once you have done it.
+```bash
+./gradlew :core:test        # ~50 tests, ~10 s, no SDK or network needed
+./gradlew :core:eval        # real model on the simulated phone; prints a scorecard
+./gradlew :core:eval --args="--models google/gemini-2.5-flash,openai/gpt-4.1-mini --runs 3"
+./gradlew :core:eval --args="--language Hindi --tasks bluetooth_on,wa_video_amma"
+./gradlew :core:eval --args="--speech"   # Sarvam TTS → realtime STT round trip
+./gradlew :core:eval --args="--dump"     # every simulated screen as the model sees it
+```
 
-## Architecture (short)
+`:core:test` covers the encoder, every golden task end to end with a perfect guide, the
+wire path through a fake model server, Sarvam's socket protocol against a fake server,
+and a fuzz run of 300 sessions with people who press the wrong thing or wander off.
 
-| Layer | Role |
-|-------|------|
-| `ScreenAgentAccessibilityService` | Portal-style tree indexing, read-only (no gestures, no screenshots) |
-| `LlmRouter` | Multi-provider chat (local + cloud) |
-| `AgentOrchestrator` | One step per turn: observe → ask the model → show it (cap 20 steps) |
-| `ToolExecutor` | Turns a step into cursor + instruction, then waits for the user |
-| `PointerOverlay` | Spotlight, neon ring and cursor drawn in absolute screen coordinates |
-| `TreeJson.movedOn` | Decides whether the user actually did it, ignoring cosmetic redraws |
+On the phone, every session is recorded to `files/sessions/*.jsonl` — each screen as the
+model saw it, each step, timings and tokens:
 
-## Explicit non-goals
+```bash
+adb shell run-as com.drishti ls files/sessions
+adb shell run-as com.drishti cat files/sessions/<file>.jsonl
+```
 
-No multilingual support, no cloud sync, no Play Store packaging, no third-party mobile-automation frameworks.
+CI (`.github/workflows/ci.yml`) runs the core tests, builds the APK and lint on every push,
+and runs the live eval on demand when `OPENROUTER_API_KEY` is set as a repository secret.
+
+## Privacy
+
+Screens in banking, payment, health and password apps are never read (enforced in code,
+every step). Screen text — and a screenshot only when the text isn't enough, which can be
+switched off — goes to the configured model to decide the next step; Aura stores nothing
+off the phone. Keys are compiled into debug builds from `local.properties`; move them behind
+a server before distributing the app to anyone else.

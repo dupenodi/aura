@@ -19,8 +19,12 @@ fun escapeBuildConfig(value: String): String =
     value.replace("\\", "\\\\").replace("\"", "\\\"")
 
 val anthropicApiKey: String = localProperties.getProperty("ANTHROPIC_API_KEY") ?: ""
+// Each step is a quick judgement, so the default is a fast model; the smart one is only used
+// after a step goes wrong. Tune both with `./gradlew :core:eval`.
 val anthropicModel: String =
-    localProperties.getProperty("ANTHROPIC_MODEL") ?: "claude-sonnet-4-20250514"
+    localProperties.getProperty("ANTHROPIC_MODEL") ?: "claude-haiku-4-5"
+val anthropicSmartModel: String =
+    localProperties.getProperty("ANTHROPIC_SMART_MODEL") ?: "claude-sonnet-4-5"
 
 val openAiApiKey: String = localProperties.getProperty("OPENAI_API_KEY") ?: ""
 val openAiModel: String =
@@ -29,6 +33,12 @@ val openAiModel: String =
 val openRouterApiKey: String = localProperties.getProperty("OPENROUTER_API_KEY") ?: ""
 val openRouterModel: String =
     localProperties.getProperty("OPENROUTER_MODEL") ?: "google/gemini-2.5-flash"
+val openRouterSmartModel: String =
+    localProperties.getProperty("OPENROUTER_SMART_MODEL") ?: "anthropic/claude-sonnet-4.5"
+val openRouterFallbackModels: String =
+    localProperties.getProperty("OPENROUTER_FALLBACK_MODELS") ?: "openai/gpt-4.1-mini"
+
+val sarvamApiKey: String = localProperties.getProperty("SARVAM_API_KEY") ?: ""
 
 val geminiApiKey: String = localProperties.getProperty("GEMINI_API_KEY") ?: ""
 val geminiModel: String =
@@ -62,10 +72,14 @@ android {
 
         buildConfigField("String", "ANTHROPIC_API_KEY", "\"${escapeBuildConfig(anthropicApiKey)}\"")
         buildConfigField("String", "ANTHROPIC_MODEL", "\"${escapeBuildConfig(anthropicModel)}\"")
+        buildConfigField("String", "ANTHROPIC_SMART_MODEL", "\"${escapeBuildConfig(anthropicSmartModel)}\"")
         buildConfigField("String", "OPENAI_API_KEY", "\"${escapeBuildConfig(openAiApiKey)}\"")
         buildConfigField("String", "OPENAI_MODEL", "\"${escapeBuildConfig(openAiModel)}\"")
         buildConfigField("String", "OPENROUTER_API_KEY", "\"${escapeBuildConfig(openRouterApiKey)}\"")
         buildConfigField("String", "OPENROUTER_MODEL", "\"${escapeBuildConfig(openRouterModel)}\"")
+        buildConfigField("String", "OPENROUTER_SMART_MODEL", "\"${escapeBuildConfig(openRouterSmartModel)}\"")
+        buildConfigField("String", "OPENROUTER_FALLBACK_MODELS", "\"${escapeBuildConfig(openRouterFallbackModels)}\"")
+        buildConfigField("String", "SARVAM_API_KEY", "\"${escapeBuildConfig(sarvamApiKey)}\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"${escapeBuildConfig(geminiApiKey)}\"")
         buildConfigField("String", "GEMINI_MODEL", "\"${escapeBuildConfig(geminiModel)}\"")
         buildConfigField("String", "LOCAL_LLM_BASE_URL", "\"${escapeBuildConfig(localLlmBaseUrl)}\"")
@@ -130,6 +144,8 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+
+    implementation(project(":core"))
 
     testImplementation("junit:junit:4.13.2")
 }

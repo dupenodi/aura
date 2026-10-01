@@ -196,6 +196,10 @@ class SimPhone(
         path.forEach { stack.add(it) }
     }
 
+    /** Where the phone is and what is set on it — equal before and after a press that did nothing. */
+    fun fingerprint(): String =
+        "${stack.joinToString("/")}|${state.toggles}|${state.text}|${state.scroll}|${state.flags}|${state.focusedField}|${state.keyboard}"
+
     fun advanceTime(ms: Long) {
         clockMs += ms
     }

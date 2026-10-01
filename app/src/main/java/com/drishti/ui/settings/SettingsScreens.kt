@@ -234,6 +234,8 @@ fun PresenceScreen(
 fun PrivacyScreen(
     paused: Boolean,
     onPaused: (Boolean) -> Unit,
+    useScreenshots: Boolean,
+    onUseScreenshots: (Boolean) -> Unit,
     onDeleteHistory: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -252,8 +254,9 @@ fun PrivacyScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "Screen understanding runs on this phone. Nothing is uploaded, stored, " +
-                    "or used for training.",
+                "To work out your next step, Aura sends the words on your screen to its AI " +
+                    "model — and, only when the words aren't enough, a picture of the app you're in. " +
+                    "Aura doesn't keep either.",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
             )
@@ -271,6 +274,11 @@ fun PrivacyScreen(
             )
 
             AuraCard {
+                AuraRow(
+                    "Use a screen picture when needed",
+                    showChevron = false,
+                    trailing = { AuraToggle(useScreenshots, onUseScreenshots) },
+                )
                 AuraRow(
                     "Pause Aura everywhere",
                     showChevron = false,

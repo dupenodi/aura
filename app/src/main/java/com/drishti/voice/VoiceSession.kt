@@ -19,22 +19,19 @@ import androidx.core.content.ContextCompat
  * the recogniser so the caller can start on press, stream the live transcript into the
  * bubble, and finish the moment the finger lifts.
  */
-class VoiceSession(private val context: Context) {
-
-    /** Why a session couldn't run, in words we can show the user. */
-    enum class Failure { NoPermission, Unavailable, NoSpeech, Error }
+class VoiceSession(private val context: Context) : HoldToTalk {
 
     private var recognizer: SpeechRecognizer? = null
     private var finished = false
 
     private var onPartial: ((String) -> Unit)? = null
     private var onFinal: ((String) -> Unit)? = null
-    private var onFailure: ((Failure) -> Unit)? = null
+    private var onFailure: ((HoldToTalk.Failure) -> Unit)? = null
 
     /** Best transcript so far, used when the user releases before the engine settles. */
     private var latestPartial: String = ""
 
-    fun hasPermission(): Boolean =
+    override fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
 
@@ -42,11 +39,11 @@ class VoiceSession(private val context: Context) {
      * Starts listening. [languageTag] is a BCP-47 tag such as "en-IN" or "hi-IN"; the
      * platform recogniser falls back to its default when it can't serve that language.
      */
-    fun start(
+    override fun start(
         languageTag: String,
         onPartial: (String) -> Unit,
         onFinal: (String) -> Unit,
-        onFailure: (Failure) -> Unit,
+        onFailure: (HoldToTalk.Failure) -> Unit,
     ) {
         this.onPartial = onPartial
         this.onFinal = onFinal
@@ -55,16 +52,16 @@ class VoiceSession(private val context: Context) {
         latestPartial = ""
 
         if (!hasPermission()) {
-            fail(Failure.NoPermission)
+            fail(HoldToTalk.Failure.NoPermission)
             return
         }
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            fail(Failure.Unavailable)
+            fail(HoldToTalk.Failure.Unavailable)
             return
         }
 
         val engine = runCatching { SpeechRecognizer.createSpeechRecognizer(context) }
-            .getOrNull() ?: run { fail(Failure.Unavailable); return }
+            .getOrNull() ?: run { fail(HoldToTalk.Failure.Unavailable); return }
         recognizer = engine
 
         engine.setRecognitionListener(object : RecognitionListener {
@@ -91,7 +88,7 @@ class VoiceSession(private val context: Context) {
                     ?.firstOrNull()
                     .orEmpty()
                     .ifBlank { latestPartial }
-                if (text.isBlank()) fail(Failure.NoSpeech) else succeed(text)
+                if (text.isBlank()) fail(HoldToTalk.Failure.NoSpeech) else succeed(text)
             }
 
             override fun onError(error: Int) {
@@ -103,11 +100,11 @@ class VoiceSession(private val context: Context) {
                 }
                 fail(
                     when (error) {
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> Failure.NoPermission
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> HoldToTalk.Failure.NoPermission
                         SpeechRecognizer.ERROR_NO_MATCH,
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
-                        -> Failure.NoSpeech
-                        else -> Failure.Error
+                        -> HoldToTalk.Failure.NoSpeech
+                        else -> HoldToTalk.Failure.Error
                     },
                 )
             }
@@ -128,17 +125,17 @@ class VoiceSession(private val context: Context) {
         runCatching { engine.startListening(intent) }
             .onFailure {
                 Log.w(TAG, "startListening failed: ${it.message}")
-                fail(Failure.Error)
+                fail(HoldToTalk.Failure.Error)
             }
     }
 
     /** Finger lifted: stop recording and let the engine deliver its final result. */
-    fun stop() {
+    override fun stop() {
         runCatching { recognizer?.stopListening() }
     }
 
     /** Abandon the session entirely (drag, or the service going away). */
-    fun cancel() {
+    override fun cancel() {
         finished = true
         runCatching { recognizer?.cancel() }
         destroy()
@@ -151,7 +148,7 @@ class VoiceSession(private val context: Context) {
         destroy()
     }
 
-    private fun fail(reason: Failure) {
+    private fun fail(reason: HoldToTalk.Failure) {
         if (finished) return
         finished = true
         onFailure?.invoke(reason)

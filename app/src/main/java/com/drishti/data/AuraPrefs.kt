@@ -36,9 +36,29 @@ class AuraPrefs private constructor(context: Context) {
     private val _language = MutableStateFlow(AuraLanguage.fromTag(prefs.getString(KEY_LANGUAGE, null)))
     val language: StateFlow<AuraLanguage> = _language
 
-    private val _speechProvider =
-        MutableStateFlow(SpeechProvider.fromOrdinal(prefs.getInt(KEY_SPEECH_PROVIDER, 0)))
+    // Sarvam is the better voice for Indian languages, so it is the default whenever a key
+    // was built in; the phone's own engine otherwise.
+    private val _speechProvider = MutableStateFlow(
+        SpeechProvider.fromOrdinal(
+            prefs.getInt(
+                KEY_SPEECH_PROVIDER,
+                if (com.drishti.BuildConfig.SARVAM_API_KEY.isNotBlank()) SpeechProvider.Sarvam.ordinal else 0,
+            ),
+        ),
+    )
     val speechProvider: StateFlow<SpeechProvider> = _speechProvider
+
+    /** Bulbul v3 speaker. */
+    private val _voiceSpeaker = MutableStateFlow(prefs.getString(KEY_VOICE_SPEAKER, null) ?: "priya")
+    val voiceSpeaker: StateFlow<String> = _voiceSpeaker
+
+    /** Speaking rate, 0.5–2.0; slightly slow by default for people following along. */
+    private val _voicePace = MutableStateFlow(prefs.getFloat(KEY_VOICE_PACE, 0.9f).toDouble())
+    val voicePace: StateFlow<Double> = _voicePace
+
+    /** Let Aura look at a screenshot when the screen can't be read as text (games, maps). */
+    private val _useScreenshots = MutableStateFlow(prefs.getBoolean(KEY_SCREENSHOTS, true))
+    val useScreenshots: StateFlow<Boolean> = _useScreenshots
 
     /** Where the user last parked the orb; -1 means "never moved it". */
     var orbX: Int
@@ -83,7 +103,25 @@ class AuraPrefs private constructor(context: Context) {
         _speechProvider.value = provider
     }
 
+    fun setVoiceSpeaker(speaker: String) {
+        prefs.edit().putString(KEY_VOICE_SPEAKER, speaker).apply()
+        _voiceSpeaker.value = speaker
+    }
+
+    fun setVoicePace(pace: Double) {
+        prefs.edit().putFloat(KEY_VOICE_PACE, pace.toFloat()).apply()
+        _voicePace.value = pace
+    }
+
+    fun setUseScreenshots(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SCREENSHOTS, enabled).apply()
+        _useScreenshots.value = enabled
+    }
+
     companion object {
+        private const val KEY_VOICE_SPEAKER = "voice_speaker"
+        private const val KEY_VOICE_PACE = "voice_pace"
+        private const val KEY_SCREENSHOTS = "use_screenshots"
         private const val KEY_ORB = "orb_skin"
         private const val KEY_GLOW = "glow"
         private const val KEY_SPEAK = "speak_aloud"
@@ -101,25 +139,5 @@ class AuraPrefs private constructor(context: Context) {
             instance ?: synchronized(this) {
                 instance ?: AuraPrefs(context).also { instance = it }
             }
-    }
-}
-
-/**
- * Apps whose screens Aura never reads.
- *
- * This is a product promise ("anything in a banking or health app"), so it is enforced
- * in code rather than left to a setting the user could switch off by accident.
- */
-object SensitiveApps {
-    private val KEYWORDS = listOf(
-        "bank", "banking", "wallet", "upi", "paytm", "phonepe", "gpay", "paypal",
-        "chase", "hsbc", "barclays", "monzo", "revolut", "wise", "coinbase",
-        "health", "medical", "patient", "nhs", "insur",
-        "password", "authenticator", "keepass", "bitwarden", "1password", "lastpass",
-    )
-
-    fun isSensitive(packageName: String): Boolean {
-        val pkg = packageName.lowercase()
-        return KEYWORDS.any { pkg.contains(it) }
     }
 }

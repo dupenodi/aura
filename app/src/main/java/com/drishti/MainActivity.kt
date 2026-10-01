@@ -26,7 +26,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.drishti.data.AuraPrefs
 import com.drishti.data.RoutineStore
 import com.drishti.data.TaskHistory
-import com.drishti.voice.RemoteSpeech
 import com.drishti.voice.SpeechOutput
 import com.drishti.overlay.BubbleService
 import com.drishti.ui.home.HomeScreen
@@ -82,6 +81,7 @@ class MainActivity : ComponentActivity() {
                 val orbSkin by prefs.orbSkin.collectAsState()
                 val glow by prefs.glow.collectAsState()
                 val speakAloud by prefs.speakAloud.collectAsState()
+                val useScreenshots by prefs.useScreenshots.collectAsState()
                 val paused by prefs.paused.collectAsState()
                 val records by history.records.collectAsState()
                 val routines by routineStore.routines.collectAsState()
@@ -187,7 +187,7 @@ class MainActivity : ComponentActivity() {
                     Route.Language -> LanguageScreen(
                         language = language,
                         provider = speechProvider,
-                        providerConfigured = { RemoteSpeech.isConfigured(it) },
+                        providerConfigured = { it == com.drishti.voice.SpeechProvider.OnDevice || com.drishti.ai.ApiKeyStore.resolve("sarvam").isNotBlank() },
                         ttsAvailable = { tts.supports(it) },
                         onLanguage = prefs::setLanguage,
                         onProvider = prefs::setSpeechProvider,
@@ -212,7 +212,12 @@ class MainActivity : ComponentActivity() {
                     Route.Privacy -> PrivacyScreen(
                         paused = paused,
                         onPaused = prefs::setPaused,
-                        onDeleteHistory = { history.clear() },
+                        useScreenshots = useScreenshots,
+                        onUseScreenshots = prefs::setUseScreenshots,
+                        onDeleteHistory = {
+                            history.clear()
+                            com.drishti.data.SessionRecorder.clear(this@MainActivity)
+                        },
                         onBack = { route = Route.Settings },
                     )
                 }

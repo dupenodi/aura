@@ -181,8 +181,8 @@ fun LanguageScreen(
             }
 
             AuraNote(
-                "On-device works offline with no account. Sarvam and Deepgram are optional " +
-                    "and only used once you add a key.",
+                "Sarvam understands and speaks Indian languages far better, and streams so Aura " +
+                    "answers faster. On-device works offline and is used whenever Sarvam can't be reached.",
                 accent = Aura.Cyan,
                 marker = "◆",
             )

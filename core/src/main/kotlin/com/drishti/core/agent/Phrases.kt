@@ -21,6 +21,7 @@ enum class Phrase {
     Offline,
     ModelError,
     TakeYourTime,
+    NotQuite,
 }
 
 object Phrases {
@@ -42,6 +43,7 @@ object Phrases {
             Phrase.Offline to "I can't reach the internet right now.",
             Phrase.ModelError to "Something went wrong on my side. Nothing was changed.",
             Phrase.TakeYourTime to "No hurry.",
+            Phrase.NotQuite to "Not quite. Tap inside the glowing circle.",
         ),
         Language.Hindi to mapOf(
             Phrase.Looking to "मैं देखती हूँ",
@@ -57,6 +59,7 @@ object Phrases {
             Phrase.Offline to "अभी इंटरनेट से जुड़ नहीं पा रही।",
             Phrase.ModelError to "मेरी तरफ़ से कुछ गड़बड़ हुई। कुछ भी बदला नहीं गया।",
             Phrase.TakeYourTime to "कोई जल्दी नहीं।",
+            Phrase.NotQuite to "यह नहीं। चमकते गोले के अंदर छुइए।",
         ),
         Language.Bengali to mapOf(
             Phrase.Looking to "আমি দেখছি",
@@ -72,6 +75,7 @@ object Phrases {
             Phrase.Offline to "এখন ইন্টারনেটে যুক্ত হতে পারছি না।",
             Phrase.ModelError to "আমার দিকে কিছু ভুল হয়েছে। কিছুই বদলায়নি।",
             Phrase.TakeYourTime to "কোনো তাড়া নেই।",
+            Phrase.NotQuite to "এটা নয়। জ্বলজ্বলে বৃত্তের ভেতরে ছোঁবেন।",
         ),
         Language.Telugu to mapOf(
             Phrase.Looking to "నేను చూస్తాను",
@@ -87,6 +91,7 @@ object Phrases {
             Phrase.Offline to "ఇప్పుడు ఇంటర్నెట్‌కి కనెక్ట్ కాలేకపోతున్నాను.",
             Phrase.ModelError to "నా వైపు ఏదో పొరపాటు జరిగింది. ఏమీ మారలేదు.",
             Phrase.TakeYourTime to "తొందర లేదు.",
+            Phrase.NotQuite to "అది కాదు. మెరుస్తున్న వృత్తం లోపల తాకండి.",
         ),
         Language.Marathi to mapOf(
             Phrase.Looking to "मी पाहते",
@@ -102,6 +107,7 @@ object Phrases {
             Phrase.Offline to "आत्ता इंटरनेटशी जोडता येत नाही.",
             Phrase.ModelError to "माझ्याकडून काहीतरी चुकले. काहीही बदलले नाही.",
             Phrase.TakeYourTime to "घाई नाही.",
+            Phrase.NotQuite to "हे नाही. चमकणाऱ्या वर्तुळाच्या आत स्पर्श करा.",
         ),
         Language.Tamil to mapOf(
             Phrase.Looking to "நான் பார்க்கிறேன்",
@@ -117,6 +123,7 @@ object Phrases {
             Phrase.Offline to "இப்போது இணையத்துடன் இணைக்க முடியவில்லை.",
             Phrase.ModelError to "என் பக்கம் ஏதோ தவறு நடந்தது. எதுவும் மாறவில்லை.",
             Phrase.TakeYourTime to "அவசரம் இல்லை.",
+            Phrase.NotQuite to "அது இல்லை. ஒளிரும் வட்டத்தின் உள்ளே தொடுங்கள்.",
         ),
         Language.Gujarati to mapOf(
             Phrase.Looking to "હું જોઉં છું",
@@ -132,6 +139,7 @@ object Phrases {
             Phrase.Offline to "અત્યારે ઇન્ટરનેટ સાથે જોડાઈ શકતી નથી.",
             Phrase.ModelError to "મારી બાજુથી કંઈક ખોટું થયું. કંઈ બદલાયું નથી.",
             Phrase.TakeYourTime to "કોઈ ઉતાવળ નથી.",
+            Phrase.NotQuite to "એ નહીં. ચમકતા વર્તુળની અંદર સ્પર્શ કરો.",
         ),
         Language.Kannada to mapOf(
             Phrase.Looking to "ನಾನು ನೋಡುತ್ತೇನೆ",
@@ -147,6 +155,7 @@ object Phrases {
             Phrase.Offline to "ಈಗ ಇಂಟರ್ನೆಟ್‌ಗೆ ಸಂಪರ್ಕಿಸಲು ಆಗುತ್ತಿಲ್ಲ.",
             Phrase.ModelError to "ನನ್ನ ಕಡೆಯಿಂದ ಏನೋ ತಪ್ಪಾಯಿತು. ಏನೂ ಬದಲಾಗಿಲ್ಲ.",
             Phrase.TakeYourTime to "ಅವಸರ ಇಲ್ಲ.",
+            Phrase.NotQuite to "ಅದಲ್ಲ. ಹೊಳೆಯುವ ವೃತ್ತದ ಒಳಗೆ ಸ್ಪರ್ಶಿಸಿ.",
         ),
         Language.Malayalam to mapOf(
             Phrase.Looking to "ഞാൻ നോക്കട്ടെ",
@@ -162,6 +171,7 @@ object Phrases {
             Phrase.Offline to "ഇപ്പോൾ ഇന്റർനെറ്റുമായി ബന്ധിപ്പിക്കാനാകുന്നില്ല.",
             Phrase.ModelError to "എന്റെ ഭാഗത്ത് എന്തോ പിഴവ് പറ്റി. ഒന്നും മാറിയിട്ടില്ല.",
             Phrase.TakeYourTime to "ധൃതിയില്ല.",
+            Phrase.NotQuite to "അതല്ല. തിളങ്ങുന്ന വൃത്തത്തിനുള്ളിൽ തൊടൂ.",
         ),
         Language.Punjabi to mapOf(
             Phrase.Looking to "ਮੈਂ ਵੇਖਦੀ ਹਾਂ",
@@ -177,6 +187,7 @@ object Phrases {
             Phrase.Offline to "ਹੁਣੇ ਇੰਟਰਨੈੱਟ ਨਾਲ ਨਹੀਂ ਜੁੜ ਪਾ ਰਹੀ।",
             Phrase.ModelError to "ਮੇਰੇ ਵੱਲੋਂ ਕੁਝ ਗੜਬੜ ਹੋਈ। ਕੁਝ ਵੀ ਨਹੀਂ ਬਦਲਿਆ।",
             Phrase.TakeYourTime to "ਕੋਈ ਕਾਹਲੀ ਨਹੀਂ।",
+            Phrase.NotQuite to "ਇਹ ਨਹੀਂ। ਚਮਕਦੇ ਗੋਲੇ ਦੇ ਅੰਦਰ ਛੂਹੋ।",
         ),
         Language.Odia to mapOf(
             Phrase.Looking to "ମୁଁ ଦେଖୁଛି",
@@ -192,6 +203,7 @@ object Phrases {
             Phrase.Offline to "ଏବେ ଇଣ୍ଟରନେଟ ସହ ଯୋଡି ହେଉନାହିଁ।",
             Phrase.ModelError to "ମୋ ପକ୍ଷରୁ କିଛି ଭୁଲ ହେଲା। କିଛି ବଦଳିନାହିଁ।",
             Phrase.TakeYourTime to "କୌଣସି ତରବର ନାହିଁ।",
+            Phrase.NotQuite to "ଏହା ନୁହେଁ। ଚମକୁଥିବା ବୃତ୍ତ ଭିତରେ ଛୁଅଁନ୍ତୁ।",
         ),
     )
 }

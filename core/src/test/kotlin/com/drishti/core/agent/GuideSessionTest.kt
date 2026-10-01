@@ -117,6 +117,18 @@ class GuideSessionTest {
     }
 
     @Test
+    fun aPressThatMissesAndDoesNothingGetsImmediateHelp() = runTest {
+        // Step 2 is "Battery Saver"; the miss lands on "Battery usage" just above it, which
+        // is pressable but goes nowhere. (A miss on plain text raises no event at all — on a
+        // real phone too — so there is nothing to react to; they simply try again.)
+        val task = GoldenTasks.byId("battery_saver")
+        val r = run(task, behavior = SimUser.Behavior(wrongTapSteps = setOf(2)))
+        assertTrue(r.voice.said.contains(Phrases.get(Phrase.NotQuite, Language.English)), r.voice.said.toString())
+        assertEquals(1, r.user.emphasized)
+        assertTrue(task.succeeded(r.phone, r.result), r.result.history.toString())
+    }
+
+    @Test
     fun hesitationRepeatsThenReassuresThenPausesAndResumes() = runTest {
         val task = GoldenTasks.byId("battery_saver")
         val phone = GoldenTasks.prepare(task)

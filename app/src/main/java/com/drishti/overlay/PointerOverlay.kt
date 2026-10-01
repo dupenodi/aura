@@ -44,33 +44,47 @@ class PointerOverlay(private val context: Context) {
      */
     private var showGeneration = 0
 
-    /** Set by the host (BubbleService) to render status/agent text in its chat bubble. */
-    var statusListener: ((text: String, durationMs: Long) -> Unit)? = null
-
+    /**
+     * Rings [bounds] with [label] beside it. With no [durationMs] it stays until [hide] —
+     * a guided step stays on screen until the user does it, however long they take.
+     */
     @JvmOverloads
-    fun showTargetAt(bounds: Rect, durationMs: Long = DEFAULT_HOLD_MS, label: String? = null) {
+    fun showTargetAt(bounds: Rect, durationMs: Long? = null, label: String? = null) {
         handler.post {
             if (!ensurePointer()) return@post
             val generation = ++showGeneration
             pointerView.visibility = View.VISIBLE
             pointerView.setTarget(bounds, label)
-            handler.postDelayed({
-                if (generation == showGeneration) pointerView.dismiss()
-            }, durationMs.coerceAtLeast(MIN_HOLD_MS))
+            durationMs?.let { ms ->
+                handler.postDelayed({
+                    if (generation == showGeneration) pointerView.dismiss()
+                }, ms.coerceAtLeast(MIN_HOLD_MS))
+            }
         }
+    }
+
+    /**
+     * Shows a finger sliding across the middle of the screen: the gesture for a scroll step.
+     * [up] is the direction the finger moves (to see more below, the finger moves up).
+     */
+    fun showSwipe(up: Boolean, label: String?) {
+        handler.post {
+            if (!ensurePointer()) return@post
+            showGeneration++
+            pointerView.visibility = View.VISIBLE
+            pointerView.setSwipe(up, label)
+        }
+    }
+
+    /** They have been looking for a while: a bigger, brighter pulse. */
+    fun emphasize() {
+        handler.post { pointerView.emphasize() }
     }
 
     fun hide() {
         handler.post {
             showGeneration++
             pointerView.dismiss()
-            statusListener?.invoke("", 0L)
-        }
-    }
-
-    fun showStatus(text: String, durationMs: Long = 2000L) {
-        handler.post {
-            statusListener?.invoke(text, durationMs)
         }
     }
 
@@ -198,7 +212,10 @@ class PointerOverlay(private val context: Context) {
         }
         private val labelTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = NEON
-            textSize = dp(13f)
+            // sp, not dp: follows the phone's font size setting, which older users raise.
+            textSize = android.util.TypedValue.applyDimension(
+                android.util.TypedValue.COMPLEX_UNIT_SP, 17f, context.resources.displayMetrics,
+            )
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
 
@@ -267,16 +284,61 @@ class PointerOverlay(private val context: Context) {
         private var pulsePhase = 0f
         private var rippleFraction = 1f
 
+        /** Scroll steps: a finger gliding up or down the middle of the screen. */
+        private var swipeMode = false
+        private var swipeUp = true
+        private var swipePhase = 0f
+        private var swipeAnimator: ValueAnimator? = null
+        private val swipePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = NEON; style = Paint.Style.FILL }
+        private val swipeTrailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = NEON
+            style = Paint.Style.STROKE
+            strokeWidth = dp(6f)
+            strokeCap = Paint.Cap.ROUND
+        }
+
+        /** 1 normally; larger once they've been looking for a while. */
+        private var emphasis = 1f
+
         private var moveAnimator: ValueAnimator? = null
         private var pulseAnimator: ValueAnimator? = null
         private var revealAnimator: ValueAnimator? = null
         private var rippleAnimator: ValueAnimator? = null
 
+        fun setSwipe(up: Boolean, label: String?) {
+            swipeMode = true
+            swipeUp = up
+            showHighlight = false
+            cursorVisible = false
+            emphasis = 1f
+            labelText = label?.takeIf { it.isNotBlank() }?.take(LABEL_MAX)
+            animateReveal(1f)
+            swipeAnimator?.cancel()
+            swipeAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 1_400
+                repeatCount = ValueAnimator.INFINITE
+                interpolator = DecelerateInterpolator(1.2f)
+                addUpdateListener {
+                    swipePhase = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
+
+        fun emphasize() {
+            emphasis = 1.8f
+            invalidate()
+        }
+
         fun setTarget(bounds: Rect, label: String?) {
+            swipeMode = false
+            swipeAnimator?.cancel()
+            emphasis = 1f
             target.set(bounds)
             // Breathing room so the ring frames the element rather than clipping it.
             target.inset(-dp(6f), -dp(6f))
-            labelText = label?.takeIf { it.isNotBlank() }?.take(38)
+            labelText = label?.takeIf { it.isNotBlank() }?.take(LABEL_MAX)
             showHighlight = true
             animateReveal(1f)
             // Aim at the element's centre; the cursor tip is its own origin.
@@ -289,12 +351,16 @@ class PointerOverlay(private val context: Context) {
             animateReveal(0f) {
                 showHighlight = false
                 cursorVisible = false
+                swipeMode = false
+                swipeAnimator?.cancel()
                 labelText = null
+                emphasis = 1f
                 stopPulse()
             }
         }
 
         fun stopAnimations() {
+            swipeAnimator?.cancel()
             moveAnimator?.cancel()
             revealAnimator?.cancel()
             rippleAnimator?.cancel()
@@ -414,7 +480,9 @@ class PointerOverlay(private val context: Context) {
             canvas.save()
             canvas.translate(-windowOrigin[0].toFloat(), -windowOrigin[1].toFloat())
 
-            if (showHighlight && !target.isEmpty) {
+            if (swipeMode) {
+                drawSwipe(canvas)
+            } else if (showHighlight && !target.isEmpty) {
                 drawSpotlight(canvas)
                 drawRing(canvas)
                 labelText?.let { drawLabel(canvas, it) }
@@ -450,10 +518,33 @@ class PointerOverlay(private val context: Context) {
             canvas.restore()
         }
 
+        /** A fingertip sliding along a fading trail, with the instruction above it. */
+        private fun drawSwipe(canvas: Canvas) {
+            val cx = windowOrigin[0] + width / 2f
+            val top = windowOrigin[1] + height * 0.30f
+            val bottom = windowOrigin[1] + height * 0.70f
+            val (from, to) = if (swipeUp) bottom to top else top to bottom
+            val y = from + (to - from) * swipePhase
+            val fade = if (swipePhase > 0.85f) (1f - swipePhase) / 0.15f else 1f
+
+            swipeTrailPaint.alpha = (110 * fade * revealFraction).toInt()
+            canvas.drawLine(cx, from, cx, y, swipeTrailPaint)
+            swipePaint.alpha = (230 * fade * revealFraction).toInt()
+            canvas.drawCircle(cx, y, dp(18f), swipePaint)
+            ringGlowPaint.alpha = (180 * fade * revealFraction).toInt()
+            canvas.drawCircle(cx, y, dp(26f), ringGlowPaint)
+
+            labelText?.let { text ->
+                target.set(cx - dp(1f), minOf(top, bottom) - dp(40f), cx + dp(1f), minOf(top, bottom) - dp(39f))
+                drawLabel(canvas, text)
+            }
+        }
+
         private fun drawRing(canvas: Canvas) {
             val radius = dp(14f)
-            // Gentle breathing pulse draws the eye without being frantic.
-            val spread = dp(3f) * pulsePhase
+            // Gentle breathing pulse draws the eye without being frantic — wider once they
+            // have been looking for a while.
+            val spread = dp(3f) * pulsePhase * emphasis * emphasis
             val ring = RectF(target).apply { inset(-spread, -spread) }
 
             ringGlowPaint.alpha = ((140 + 70 * pulsePhase) * revealFraction).toInt()
@@ -529,12 +620,12 @@ class PointerOverlay(private val context: Context) {
             // budget for that multiplier when picking how dark the scrim should read.
             private const val SCRIM_ALPHA = 132f
             private val GLIDE = PathInterpolator(0.22f, 0.9f, 0.24f, 1f)
+            private const val LABEL_MAX = 48
         }
     }
 
     companion object {
         private const val TAG = "PointerOverlay"
-        private const val DEFAULT_HOLD_MS = 900L
         private const val MIN_HOLD_MS = 650L
     }
 }

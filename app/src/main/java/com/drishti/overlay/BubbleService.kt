@@ -32,9 +32,15 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.drishti.MainActivity
 import com.drishti.R
-import com.drishti.agent.AgentOrchestrator
+import com.drishti.agent.DeviceContext
+import com.drishti.agent.GuideRunner
+import com.drishti.core.agent.Action
+import com.drishti.core.agent.Direction
+import com.drishti.core.agent.GuideUi
+import com.drishti.core.agent.ShownStep
 import com.drishti.data.AuraPrefs
-import com.drishti.voice.VoiceSession
+import com.drishti.voice.AuraVoice
+import com.drishti.voice.HoldToTalk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -58,13 +64,14 @@ class BubbleService : Service() {
     private lateinit var wm: WindowManager
     private lateinit var prefs: AuraPrefs
     private lateinit var pointerOverlay: PointerOverlay
-    private lateinit var orchestrator: AgentOrchestrator
+    private lateinit var runner: GuideRunner
+    private lateinit var voiceOut: AuraVoice
 
     private var orbView: OrbView? = null
     private var orbParams: WindowManager.LayoutParams? = null
     private var composerView: View? = null
 
-    private var voice: VoiceSession? = null
+    private var voice: HoldToTalk? = null
     private var bubbleView: BubbleCardView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var bubbleHide: Runnable? = null
@@ -77,7 +84,62 @@ class BubbleService : Service() {
     private var running = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val speech by lazy { com.drishti.voice.SpeechOutput(this) }
+
+    /**
+     * What a guided session shows. Every call can come from a background coroutine, so each
+     * one hops to the main thread before touching a window.
+     */
+    private val guideUi = object : GuideUi {
+        override fun thinking(text: String?) = mainHandler.post {
+            if (!running) return@post
+            sayHelping(text ?: "\u2026", 0)
+        }.let { }
+
+        override fun show(step: ShownStep) = mainHandler.post {
+            if (!running) return@post
+            val bounds = step.bounds
+            when {
+                bounds != null -> pointerOverlay.showTargetAt(
+                    android.graphics.Rect(bounds.l, bounds.t, bounds.r, bounds.b),
+                    null,
+                    step.instruction,
+                )
+                // To see more below, the finger moves up the screen.
+                step.action == Action.Scroll -> pointerOverlay.showSwipe(up = step.direction != Direction.Up, label = step.instruction)
+                else -> pointerOverlay.hide()
+            }
+            val line = if (step.action == Action.Type && !step.text.isNullOrBlank()) {
+                "${step.instruction}\n\u201C${step.text}\u201D"
+            } else {
+                step.instruction
+            }
+            sayHelping(line, 0)
+        }.let { }
+
+        override fun emphasize() = pointerOverlay.emphasize()
+
+        override fun hide() = pointerOverlay.hide()
+
+        override fun paused(message: String) = mainHandler.post {
+            pointerOverlay.hide()
+            say(
+                text = message,
+                durationMs = 0,
+                tag = "paused",
+                chips = listOf(
+                    BubbleChip("Carry on", primary = true) { runner.resume() },
+                    BubbleChip("Stop", primary = false) { stopRun() },
+                ),
+            )
+        }.let { }
+
+        override fun finished(message: String, success: Boolean) = mainHandler.post {
+            pointerOverlay.hide()
+            running = false
+            orbView?.busy = false
+            if (message.isNotBlank()) say(message, 6000) else say("", 0)
+        }.let { }
+    }
 
     /** Cleared on destroy so a pending long-press can't fire after teardown. */
     private var beginHoldRunnable: Runnable? = null
@@ -94,20 +156,9 @@ class BubbleService : Service() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = AuraPrefs.get(this)
         pointerOverlay = PointerOverlay(this)
-        // Status lines during a run carry a Stop chip so stop isn't only "know to tap".
-        pointerOverlay.statusListener = { text, duration ->
-            if (running && text.isNotBlank()) {
-                sayHelping(text, duration)
-            } else {
-                say(text, duration)
-            }
-        }
-        orchestrator = AgentOrchestrator(
-            appContext = applicationContext,
-            pointerOverlay = pointerOverlay,
-            scope = agentScope,
-        )
-        orchestrator.onRunStateChanged = { isRunning ->
+        voiceOut = AuraVoice(applicationContext)
+        runner = GuideRunner(applicationContext, guideUi, voiceOut, agentScope)
+        runner.onRunStateChanged = { isRunning ->
             mainHandler.post {
                 running = isRunning
                 orbView?.busy = isRunning
@@ -178,7 +229,8 @@ class BubbleService : Service() {
         // Tear down voice quietly — don't post a bubble update after the window is gone.
         voice?.cancel()
         listening = false
-        speech.shutdown()
+        runner.cancel()
+        voiceOut.shutdown()
         removeBubble()
         orbView?.let { runCatching { wm.removeView(it) } }
         orbView = null
@@ -211,7 +263,7 @@ class BubbleService : Service() {
     private fun startAsForeground() {
         val channelId = "aura_orb"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(NotificationManager::class.java).createNotificationChannel(
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
                 NotificationChannel(
                     channelId,
                     getString(R.string.overlay_channel_name),
@@ -332,6 +384,8 @@ class BubbleService : Service() {
                     when {
                         holding -> finishListening()
                         moved -> snapToEdge(view, params, size)
+                        // A paused session picks up again from the orb they were told to tap.
+                        running && runner.isPaused -> runner.resume()
                         // Mid-session the orb is the way out. Nothing else may cover the
                         // app the user is being guided through, and the orb is the one
                         // control they have already been watching.
@@ -405,7 +459,7 @@ class BubbleService : Service() {
     private fun beginListening() {
         if (listening) return
 
-        val session = VoiceSession(this)
+        val session = HoldToTalk.create(this, agentScope, prefs.speechProvider.value) { keyterms() }
         if (!session.hasPermission()) {
             say("I need microphone permission — tap to grant it", 5000)
             openMicPermission()
@@ -415,7 +469,9 @@ class BubbleService : Service() {
         listening = true
         voice = session
         orbView?.listening = true
-        speech.stop()
+        voiceOut.stop()
+        // Open the model connection while they talk, so the first step isn't waiting on TLS.
+        runner.warmUp()
         say("Listening — release to send", 30_000, tag = "listening", chips = emptyList())
 
         session.start(
@@ -436,13 +492,13 @@ class BubbleService : Service() {
                     endListening()
                     say(
                         when (reason) {
-                            VoiceSession.Failure.NoPermission ->
+                            HoldToTalk.Failure.NoPermission ->
                                 "I need microphone permission to listen"
-                            VoiceSession.Failure.Unavailable ->
+                            HoldToTalk.Failure.Unavailable ->
                                 "Voice input isn't available on this phone — type instead"
-                            VoiceSession.Failure.NoSpeech ->
+                            HoldToTalk.Failure.NoSpeech ->
                                 "I didn't catch that — hold me and try again"
-                            VoiceSession.Failure.Error ->
+                            HoldToTalk.Failure.Error ->
                                 "Something went wrong listening — type instead"
                         },
                         3500,
@@ -471,6 +527,14 @@ class BubbleService : Service() {
         voice = null
         orbView?.listening = false
     }
+
+    /**
+     * Words to bias speech recognition towards: the names of their apps, and the setting
+     * names people ask about. "WhatsApp" said in a Hindi sentence should come back as
+     * WhatsApp, not वाट्सएप or "what's up".
+     */
+    private fun keyterms(): List<String> =
+        (COMMON_TERMS + DeviceContext.installedApps(this).map { it.label }).distinct().take(50)
 
     /** Microphone is granted in the app, so send the user there with an explanation. */
     private fun openMicPermission() {
@@ -646,15 +710,15 @@ class BubbleService : Service() {
         // Optimistic so a quick tap stops even before the agent job posts running=true.
         running = true
         orbView?.busy = true
-        sayHelping("Working on it — tap me to stop", 5000)
-        orchestrator.runTask(task)
+        sayHelping("\u201C${task.trim()}\u201D", 0)
+        runner.runTask(task)
     }
 
     private fun stopRun() {
-        orchestrator.cancel()
+        runner.cancel()
         running = false
         orbView?.busy = false
-        speech.stop()
+        voiceOut.stop()
         say("Stopped.", 2500)
     }
 
@@ -838,6 +902,10 @@ class BubbleService : Service() {
         const val ACTION_RUN_TASK = "com.drishti.overlay.RUN_TASK"
         private const val EXTRA_TASK = "task"
         private const val NOTIF_ID = 42
+        private val COMMON_TERMS = listOf(
+            "Wi-Fi", "Bluetooth", "WhatsApp", "YouTube", "Settings", "Google Pay", "PhonePe",
+            "hotspot", "airplane mode", "dark mode", "font size", "ringtone", "alarm",
+        )
 
         fun start(context: Context) {
             if (AuraPrefs.get(context).paused.value) return

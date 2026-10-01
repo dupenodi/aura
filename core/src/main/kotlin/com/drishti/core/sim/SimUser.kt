@@ -86,7 +86,17 @@ class SimUser(
         val b = step.bounds
         when (step.action) {
             Action.Tap, Action.LongPress -> if (b != null) {
-                if (wrong) phone.tapAt(b.cx, b.t - 60) else phone.tapAt(b.cx, b.cy)
+                if (wrong) {
+                    val before = phone.fingerprint()
+                    phone.tapAt(b.cx, b.t - 60)
+                    // Nothing happened: like anyone would, they look again and press the ring.
+                    if (phone.fingerprint() == before) {
+                        delay(behavior.reactionMs)
+                        phone.tapAt(b.cx, b.cy)
+                    }
+                } else {
+                    phone.tapAt(b.cx, b.cy)
+                }
             }
 
             Action.Type -> {

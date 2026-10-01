@@ -1,7 +1,22 @@
 # Aura — from hackathon POC to a product that works on real Android phones
 
-Status: **proposal, nothing implemented yet**. Written 2026-10-01 after a full read of the
-codebase and Sarvam's current API surface. Sections 6 and 8 need your input before work starts.
+Written 2026-10-01 after a full read of the codebase and Sarvam's current API surface.
+
+**Status (2026-10-01):** decisions made — OpenRouter for models, Sarvam for speech,
+screenshots allowed, Pixel 6 as the test phone, distribution later. Speed, the harness and
+testing came first, so the work went 0 → 2 → 3 with Phase 1's simulator built alongside:
+
+- Done: `:core` module; compact screen encoder; event-driven guide session (off-path
+  recovery, hesitation ladder with pause/resume, "not quite" feedback); OpenRouter/Anthropic
+  clients with forced tool calls, caching and fallbacks; Sarvam saaras:v4 realtime STT and
+  bulbul:v3 streaming TTS wired into the app; simulated Pixel + 20 golden tasks + fuzzing;
+  live eval runner; session recorder; CI workflow; accessibility service rewritten (no more
+  250 ms main-thread polling).
+- Not yet verified on a device: everything in `:app` compiles against the Android 15
+  framework, but has not run on a phone. The first real-device pass is the next step.
+- Still open: Phase 4 UI work (contrast, light theme, localisation, onboarding for restricted
+  settings and OEM battery killers), keys behind a server, real-device recordings as eval
+  fixtures.
 
 ---
 

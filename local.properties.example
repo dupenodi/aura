@@ -1,29 +1,38 @@
-## Copy to local.properties (gitignored) and fill in values.
+## Copy to local.properties (gitignored) and fill in values. Never commit keys.
+## Android Studio writes sdk.dir for you.
 sdk.dir=/path/to/Android/Sdk
 
-# TODO: Move API keys behind a server-side proxy before any real distribution.
-# Do not commit real keys. Client-side keys are only for local development.
-#
-# After changing keys: rebuild the APK (BuildConfig is generated at compile time).
-#   ./gradlew :app:assembleDebug
-
-# Provider selection: auto | local | openrouter | anthropic | openai
-# auto tries: local → openrouter → anthropic → openai (skips unconfigured)
+# ---- Model --------------------------------------------------------------------------------
+# auto | openrouter | anthropic | openai | gemini | local
+# auto uses the first provider with a key, in that order.
 LLM_PROVIDER=auto
 
-# Local OpenAI-compatible server (Ollama / LM Studio / vLLM)
-# Phone via USB: adb reverse tcp:11434 tcp:11434  then use http://127.0.0.1:11434/v1
-# Emulator: http://10.0.2.2:11434/v1
-# Same Wi‑Fi LAN: http://192.168.x.x:11434/v1
+# One key, every model, and provider-side failover. Recommended.
+OPENROUTER_API_KEY=
+# Used for every step. Pick by running: ./gradlew :core:eval --args="--models a,b,c"
+OPENROUTER_MODEL=google/gemini-2.5-flash
+# Used only after a step goes wrong (bad reference, a repeat, the user going off-path).
+OPENROUTER_SMART_MODEL=anthropic/claude-sonnet-4.5
+# Tried by OpenRouter itself if the chosen model is down.
+OPENROUTER_FALLBACK_MODELS=openai/gpt-4.1-mini
+
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-haiku-4-5
+ANTHROPIC_SMART_MODEL=claude-sonnet-4-5
+
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4.1-mini
+
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+
+# Local OpenAI-compatible server (Ollama / LM Studio), for development.
+# Phone via USB: adb reverse tcp:11434 tcp:11434, then http://127.0.0.1:11434/v1
 LOCAL_LLM_BASE_URL=
 LOCAL_LLM_MODEL=llama3.2
 LOCAL_LLM_API_KEY=
 
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=google/gemini-2.5-flash
-
-ANTHROPIC_API_KEY=
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
-
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+# ---- Speech -------------------------------------------------------------------------------
+# Sarvam: saaras:v4 realtime speech-to-text and bulbul:v3 text-to-speech for all 11 languages.
+# With a key set, Sarvam becomes the default voice; the phone's own engine is the fallback.
+SARVAM_API_KEY=

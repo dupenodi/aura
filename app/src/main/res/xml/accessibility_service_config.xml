@@ -1,15 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Read-only by design: Aura points at things, it never taps them, so it asks for neither
-    gesture dispatch nor screenshots. isAccessibilityTool is required on Android 14+ so
-    accessibilityDataSensitive views (e.g. Settings) are readable.
+    Read-only by design: Aura points at things, it never taps them, so it asks for no gesture
+    dispatch. It listens for the user's own clicks, typing and scrolling — that is how a step
+    is known to be done — and may take a screenshot of the current app when the tree can't
+    describe the screen (games, maps, web views). isAccessibilityTool is required on
+    Android 14+ so accessibilityDataSensitive views (e.g. Settings) are readable.
+    notificationTimeout 0: a click must arrive the moment it happens, not batched.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewSelected|typeViewFocused|typeViewTextChanged|typeViewScrolled|typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagIncludeNotImportantViews|flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:description="@string/accessibility_service_description"
     android:isAccessibilityTool="true"
-    android:notificationTimeout="100"
+    android:notificationTimeout="0"
     android:settingsActivity="com.drishti.MainActivity" />

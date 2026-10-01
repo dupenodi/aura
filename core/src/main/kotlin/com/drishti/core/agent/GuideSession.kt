@@ -384,6 +384,7 @@ class GuideSession(
         var lastPoll = shownAt
         var typed: String? = null
         var typedAt = 0L
+        var corrected = false
 
         while (true) {
             val now = clock()
@@ -417,7 +418,8 @@ class GuideSession(
                     val hit = matchesTarget(ev, resolved)
                     if (hit == true) return finishStep(WatchOutcome.OnTarget(), interrupt = true)
                     // Pressed something else. If it took them somewhere, follow; if it did
-                    // nothing (a label, an empty area), keep waiting with the ring up.
+                    // nothing (a label, an empty area), keep waiting with the ring up — and
+                    // say so once, straight away, rather than leave them wondering.
                     settle()
                     val after = observe() ?: continue
                     if (ScreenEncoder.movedOn(before.encoded, after.encoded)) {
@@ -425,6 +427,11 @@ class GuideSession(
                             if (hit == null) WatchOutcome.Moved() else WatchOutcome.OffTarget(pressedLabel(ev)),
                             interrupt = true,
                         )
+                    }
+                    if (hit == false && !corrected) {
+                        corrected = true
+                        ui.emphasize()
+                        voice.say(Phrases.get(Phrase.NotQuite, language), language)
                     }
                 }
 
